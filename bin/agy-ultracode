@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# agy-ultracode: avvia Antigravity (agy) in modalità UltraCode.
+#   - modello principale: $AGY_KIT_MODEL (default gemini-3.1-pro) con --effort high
+#   - regole: skill globale `ultracode`, caricata con il comando /ultracode
+#   - sotto-agenti Flash: prescritti dalla skill (invoke_subagent, model flash)
+# Uso:
+#   ultracode                       sessione interattiva
+#   ultracode "task"                sessione interattiva con task iniziale
+#   ultracode -p "task"             esecuzione non interattiva (print)
+#   ultracode -c                    altri flag di agy passati invariati
+# ==============================================================================
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+. "$KIT_DIR/lib/common.sh"
+
+case "${1:-}" in
+  -h|--help)
+    sed -n '3,12p' "$src" | sed 's/^# \{0,1\}//'
+    exit 0 ;;
+esac
+
+agy_kit_require_bin
+agy_kit_base_flags
+
+if [ $# -eq 0 ]; then
+  exec "$AGY_BIN" "${BASE_FLAGS[@]}" -i "$(agy_kit_skill_prefix "Sessione UltraCode attiva. Attendi il mio primo task.")"
+fi
+
+has_flag=false
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|--print|--prompt)
+      has_flag=true
+      args+=("$1")
+      if [ $# -gt 1 ] && [[ "$2" != -* ]]; then
+        args+=("$(agy_kit_skill_prefix "$2")"); shift
+      fi ;;
+    -*) has_flag=true; args+=("$1") ;;
+    *)  args+=("$1") ;;
+  esac
+  shift
+done
+
+if [ "$has_flag" = true ]; then
+  exec "$AGY_BIN" "${BASE_FLAGS[@]}" "${args[@]}"
+else
+  exec "$AGY_BIN" "${BASE_FLAGS[@]}" -i "$(agy_kit_skill_prefix "${args[*]}")"
+fi

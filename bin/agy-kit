@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# agy-kit: gestione del kit UltraCode/Compendio per Antigravity.
+#   agy-kit doctor [--online]   verifica installazione (con --online prova anche il modello)
+#   agy-kit version             versione del kit
+#   agy-kit config              mostra la configurazione effettiva
+#   agy-kit help
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+. "$KIT_DIR/lib/common.sh"
+
+BIN_DIR="${AGY_KIT_BIN_DIR:-$HOME/.local/bin}"
+SKILLS_DIR="${AGY_KIT_SKILLS_DIR:-$HOME/.gemini/config/skills}"
+
+ok=0; warn=0; fail=0
+pass() { printf '  \033[32m✔\033[0m %s\n' "$*"; ok=$((ok+1)); }
+wrn()  { printf '  \033[33m!\033[0m %s\n' "$*"; warn=$((warn+1)); }
+bad()  { printf '  \033[31m✘\033[0m %s\n' "$*"; fail=$((fail+1)); }
+
+doctor() {
+  local online=false; [ "${1:-}" = "--online" ] && online=true
+  echo "agy-kit $(cat "$KIT_DIR/VERSION") — kit in $KIT_DIR"
+  echo "Binario e modello"
+  if [ -x "$AGY_BIN" ]; then pass "agy: $AGY_BIN"; else bad "agy non trovato ($AGY_BIN)"; fi
+  local help_out=""; [ -x "$AGY_BIN" ] && help_out="$("$AGY_BIN" --help 2>&1)"
+  if printf '%s' "$help_out" | grep -q -- '--effort'; then
+    pass "agy supporta --model/--effort"
+  else
+    bad "agy --help non risponde o non supporta --effort"
+  fi
+  echo "  modello: $AGY_KIT_MODEL  effort: ${AGY_KIT_EFFORT:-(nessuno)}  skip-permissions: $AGY_KIT_SKIP_PERMISSIONS"
+
+  echo "Comandi"
+  for c in agy-ultracode ultracode agy-compendio compendio compendio-verify agy-kit; do
+    local p; p="$(command -v "$c" 2>/dev/null || true)"
+    if [ -z "$p" ]; then bad "$c non è nel PATH"; continue; fi
+    if [ -x "$p" ]; then pass "$c → $p"; else bad "$c non eseguibile: $p"; fi
+  done
+  case ":$PATH:" in *":$BIN_DIR:"*) pass "$BIN_DIR è nel PATH" ;; *) wrn "$BIN_DIR non è nel PATH di questa shell" ;; esac
+
+  echo "Skill"
+  local sk="$SKILLS_DIR/ultracode/SKILL.md"
+  if [ ! -f "$sk" ]; then bad "skill non installata: $sk"
+  elif cmp -s "$sk" "$KIT_DIR/skills/ultracode/SKILL.md"; then pass "skill ultracode allineata al kit"
+  else wrn "skill ultracode diversa dalla versione del kit (reinstalla o confronta: diff \"$sk\" \"$KIT_DIR/skills/ultracode/SKILL.md\")"
+  fi
+
+  echo "Verificatore"
+  if command -v python3 >/dev/null 2>&1; then
+    pass "python3 $(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:3])))')"
+    if "$KIT_DIR/bin/compendio-verify" --help >/dev/null 2>&1; then pass "compendio-verify eseguibile"; else bad "compendio-verify non parte"; fi
+  else
+    bad "python3 assente: compendio-verify non funzionerà"
+  fi
+  command -v pdftotext >/dev/null 2>&1 && pass "pdftotext presente (riferimenti normativi cercati anche nei PDF)" \
+    || wrn "pdftotext assente (opzionale: i PDF non sono usati dal controllo W-NORM)"
+
+  echo "Shell"
+  local rc found=false
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+    [ -f "$rc" ] && grep -q '>>> agy-kit >>>' "$rc" && { pass "blocco agy-kit presente in $rc"; found=true; }
+    if [ -f "$rc" ] && awk '/>>> agy-kit >>>/{b=1} /<<< agy-kit <<</{b=0;next} !b' "$rc" \
+         | grep -Eq "^[[:space:]]*(agy\(\)|alias (ultracode|compendio)=)"; then
+      wrn "$rc contiene ancora una vecchia definizione di agy()/alias fuori dal blocco agy-kit"
+    fi
+  done
+  $found || wrn "nessun file rc contiene il blocco agy-kit"
+
+  if $online; then
+    echo "Prova online (una richiesta minima al modello)"
+    local out tmp pid watcher
+    tmp="$(mktemp)"
+    # timeout rigido e portabile: senza login agy resta in attesa indefinitamente
+    "$AGY_BIN" --model "$AGY_KIT_MODEL" ${AGY_KIT_EFFORT:+--effort "$AGY_KIT_EFFORT"} \
+      --print-timeout 120s --output-format json \
+      -p "/ultracode Non eseguire task. Rispondi solo con il titolo H1 delle istruzioni UltraCode." \
+      </dev/null >"$tmp" 2>&1 &
+    pid=$!
+    ( sleep 150; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+    watcher=$!
+    wait "$pid" 2>/dev/null
+    kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
+    out="$(cat "$tmp")"; rm -f "$tmp"
+    if printf '%s' "$out" | grep -q '"status":"SUCCESS"'; then
+      pass "modello $AGY_KIT_MODEL risponde"
+      if printf '%s' "$out" | grep -q 'UltraCode Mode'; then pass "skill caricata tramite /ultracode"
+      else wrn "risposta ricevuta ma la skill non risulta caricata"; fi
+    elif printf '%s' "$out" | grep -qiE 'authentication required|oauth|accounts\.google\.com|not logged in|sign in'; then
+      bad "agy non ha effettuato l'accesso: avvia \`agy\` una volta, completa il login nel browser e riprova"
+    else
+      bad "richiesta fallita: $(printf '%s' "$out" | head -c 300)"
+      echo "     modelli disponibili: $AGY_BIN models"
+    fi
+  fi
+
+  echo
+  echo "Esito: $ok ok, $warn avvisi, $fail errori"
+  [ $fail -eq 0 ]
+}
+
+case "${1:-help}" in
+  doctor)  shift; doctor "$@" ;;
+  version) cat "$KIT_DIR/VERSION" ;;
+  config)
+    echo "config:  $AGY_KIT_CONFIG $([ -f "$AGY_KIT_CONFIG" ] && echo '(presente)' || echo '(assente, uso i default)')"
+    echo "AGY_BIN=$AGY_BIN"
+    echo "AGY_KIT_MODEL=$AGY_KIT_MODEL"
+    echo "AGY_KIT_EFFORT=$AGY_KIT_EFFORT"
+    echo "AGY_KIT_SKIP_PERMISSIONS=$AGY_KIT_SKIP_PERMISSIONS"
+    echo "KIT_DIR=$KIT_DIR" ;;
+  help|-h|--help) sed -n '2,6p' "$src" | sed 's/^# \{0,1\}//' ;;
+  *) echo "agy-kit: comando sconosciuto: $1" >&2; exit 2 ;;
+esac

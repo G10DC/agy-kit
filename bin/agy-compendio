@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# agy-compendio: genera una base di conoscenza integrale e verificata di una cartella
+# con Antigravity in modalità UltraCode, poi la controlla con compendio-verify.
+#
+# Uso: compendio [opzioni] [directory]
+#   -o, --output <file>   file finale; relativo alla directory analizzata oppure
+#                         percorso assoluto (default: COMPENDIO_INTEGRALE.md)
+#   -p, --print           esecuzione non interattiva (print mode, in primo piano)
+#       --no-verify       non eseguire compendio-verify al termine
+#   -h, --help            mostra questo aiuto
+#
+# Esempi:
+#   compendio                        # analizza la cartella corrente
+#   compendio ~/Documenti/Progetto   # analizza una cartella specifica
+#   compendio -o SINTESI.md -p       # nome personalizzato, non interattivo
+#
+# Regole epistemiche: skill `ultracode` (unica fonte, caricata con /ultracode).
+# Uscita: codice di agy se fallisce, altrimenti quello di compendio-verify.
+# ==============================================================================
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+. "$KIT_DIR/lib/common.sh"
+
+usage() { sed -n '3,19p' "$src" | sed 's/^# \{0,1\}//'; }
+
+OUTPUT_FILE="COMPENDIO_INTEGRALE.md"
+TARGET_DIR="$(pwd)"
+MODE="-i"
+VERIFY=true
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output)
+      if [ $# -lt 2 ] || [ -z "$2" ] || [[ "$2" == -* ]]; then
+        echo "compendio: l'opzione $1 richiede un nome di file" >&2; exit 2
+      fi
+      OUTPUT_FILE="$2"; shift 2 ;;
+    -p|--print) MODE="-p"; shift ;;
+    --no-verify) VERIFY=false; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "compendio: opzione sconosciuta: $1 (vedi --help)" >&2; exit 2 ;;
+    *)
+      if [ -d "$1" ]; then
+        TARGET_DIR="$(cd "$1" && pwd)"; shift
+      else
+        echo "compendio: directory non trovata: $1" >&2; exit 2
+      fi ;;
+  esac
+done
+
+case "$OUTPUT_FILE" in
+  /*) OUTPUT_PATH="$OUTPUT_FILE" ;;
+  *)  OUTPUT_PATH="$TARGET_DIR/$OUTPUT_FILE" ;;
+esac
+if [ ! -d "$(dirname "$OUTPUT_PATH")" ]; then
+  echo "compendio: la cartella di destinazione non esiste: $(dirname "$OUTPUT_PATH")" >&2; exit 2
+fi
+
+TASK="Modalità COMPENDIO. Applica integralmente la skill ultracode (tiering dei modelli, tassonomia a 5 livelli, 6 Iron Rules, verifica deterministica).
+
+Cartella da analizzare: ${TARGET_DIR}
+File di destinazione: ${OUTPUT_PATH}
+
+Obiettivo: una base di conoscenza unica, ad altissima fedeltà, di TUTTI i file della cartella (sottocartelle incluse; escludi solo il file di destinazione e cartelle tecniche come .git e node_modules), che mappi:
+- contenuto testuale, sorgente e strutturale di ogni file;
+- link, riferimenti interni ed esterni, contatti ed endpoint;
+- nomi dei file, percorsi e metadati reali (stat, shasum -a 256 eseguiti davvero);
+- citazioni, vincoli contrattuali, formule, dipendenze;
+- relazioni tra le fonti e discrepanze.
+
+Vincolo: non creare né modificare altri file nella cartella analizzata oltre al file di destinazione. Per file di lavoro usa una cartella temporanea creata con mktemp -d, fuori dalla cartella analizzata, e cancellala alla fine.
+
+Procedura:
+1. Censisci l'albero dei file con un comando reale e annota il totale.
+2. Delega la lettura analitica e l'estrazione verbatim a sotto-agenti con invoke_subagent e modello flash, in parallelo per gruppi di file. Tieni per te (Pro) sintesi, collegamenti, deduzioni e verifica.
+3. Normalizza e confronta i dati; raccogli le discrepanze in una sezione [VERIFICARE].
+4. Scrivi il file con: indice (TOC), scheda rapida, inventario dei file con metadati, schede tematiche, collegamenti incrociati, cronologia, registro delle deduzioni (ID, premessa, motivazione, confidenza), discrepanze [VERIFICARE], glossario, tabella di contatti e URL, appendice di metodo e limiti.
+5. Controlla che ogni file dell'albero del punto 1 sia coperto.
+6. Esegui: compendio-verify \"${OUTPUT_PATH}\" --root \"${TARGET_DIR}\" — correggi ogni ERROR e ripeti finché esce con codice 0. Riporta gli avvisi residui nella risposta finale."
+
+agy_kit_require_bin
+agy_kit_base_flags
+
+cd "$TARGET_DIR"
+set +e
+"$AGY_BIN" "${BASE_FLAGS[@]}" "$MODE" "$(agy_kit_skill_prefix "$TASK")"
+status=$?
+set -e
+
+if [ $status -ne 0 ]; then
+  echo "compendio: agy è terminato con codice $status" >&2
+  exit $status
+fi
+
+if [ "$VERIFY" = true ]; then
+  if [ -f "$OUTPUT_PATH" ]; then
+    echo
+    echo "── compendio-verify ─────────────────────────────────────────────"
+    "$KIT_DIR/bin/compendio-verify" "$OUTPUT_PATH" --root "$TARGET_DIR"
+  else
+    echo "compendio: il file di destinazione non è stato creato: $OUTPUT_PATH" >&2
+    exit 3
+  fi
+fi

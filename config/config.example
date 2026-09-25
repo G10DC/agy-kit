@@ -1,0 +1,19 @@
+# agy-kit — configurazione locale (~/.config/agy-kit/config)
+# Formato: assegnazioni shell. Le variabili d'ambiente omonime hanno la precedenza.
+
+# Modello principale di UltraCode / Compendio. Elenco dei modelli disponibili: `agy models`
+# (con --effort usare l'ID senza suffisso, es. gemini-3.1-pro; senza effort es. gemini-3.1-pro-high)
+AGY_KIT_MODEL=gemini-3.1-pro
+
+# Sforzo di ragionamento: low | medium | high  (vuoto = non passare --effort)
+AGY_KIT_EFFORT=high
+
+# 1 = UltraCode/Compendio non chiedono permessi per i comandi (comportamento storico)
+# 0 = agy chiede conferma come di consueto
+AGY_KIT_SKIP_PERMISSIONS=1
+
+# 1 = anche le sessioni `agy` normali saltano i permessi (sconsigliato)
+AGY_KIT_PLAIN_SKIP_PERMISSIONS=0
+
+# Percorso del binario agy, se non è nel PATH
+#AGY_BIN="$HOME/.local/bin/agy"
