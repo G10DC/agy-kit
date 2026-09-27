@@ -1,0 +1,22 @@
+{
+  "_help": "agy-kit - bridge Claude Code -> Antigravity (~/.config/agy-kit/bridge.json). Le chiavi che iniziano con _ sono commenti; le chiavi assenti prendono il default. Guida: docs/GUIDA_CLAUDE.md",
+  "_help_command": "Comando per UN task headless. Default: agy-ultracode del kit, che aggiunge modello, effort e permessi da ~/.config/agy-kit/config e antepone /ultracode al prompt. Segnaposto: {prompt} {schema} {timeout} {cwd} {kit_dir}; l'elemento {conversation_args} diventa --conversation <id> oppure sparisce.",
+  "command": [
+    "{kit_dir}/bin/agy-ultracode",
+    "--output-format", "json",
+    "--json-schema", "{schema}",
+    "--print-timeout", "{timeout}",
+    "{conversation_args}",
+    "-p", "{prompt}"
+  ],
+  "_help_limits": "max_parallel = task Antigravity contemporanei; gli altri aspettano in coda fino a queue_wait_minutes. task_timeout_minutes = durata massima di un task.",
+  "max_parallel": 4,
+  "task_timeout_minutes": 25,
+  "queue_wait_minutes": 90,
+  "_help_roots": "Cartelle in cui Antigravity puo lavorare. Vuoto = il progetto di Claude Code e la sua radice git. [\"*\"] = ovunque.",
+  "allowed_roots": [],
+  "_help_logs": "null = ~/.local/state/agy-kit/bridge-logs (un file JSON per task).",
+  "log_dir": null,
+  "keep_logs": 200,
+  "extra_env": {}
+}

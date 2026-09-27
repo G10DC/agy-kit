@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # agy-kit uninstaller.  Uso: ./uninstall.sh [--purge] [--dry-run]
 #   rimuove comandi, blocco shell, kit e skill ultracode (solo se identica a quella del kit)
-#   --purge  rimuove anche ~/.config/agy-kit
+#   --purge  rimuove anche ~/.config/agy-kit e i log del bridge (~/.local/state/agy-kit)
 # I backup creati da install.sh restano in ~/.local/share/agy-kit-backups/.
 set -euo pipefail
 
@@ -9,6 +9,7 @@ KIT_HOME="${AGY_KIT_HOME:-$HOME/.local/share/agy-kit}"
 BIN_DIR="${AGY_KIT_BIN_DIR:-$HOME/.local/bin}"
 SKILLS_DIR="${AGY_KIT_SKILLS_DIR:-$HOME/.gemini/config/skills}"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agy-kit"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agy-kit"
 PURGE=false; DRY=false
 for a in "$@"; do
   case "$a" in
@@ -19,7 +20,7 @@ for a in "$@"; do
 done
 run() { if $DRY; then echo "  [dry-run] $*"; else "$@"; fi; }
 
-for c in agy-ultracode ultracode agy-compendio compendio compendio-verify agy-kit; do
+for c in agy-ultracode ultracode agy-compendio compendio compendio-verify agy-kit ultra-ag; do
   p="$BIN_DIR/$c"
   if [ -L "$p" ] && case "$(readlink "$p")" in "$KIT_HOME"/*) true ;; *) false ;; esac; then
     run rm -f "$p"; echo "✔ rimosso $p"
@@ -44,5 +45,8 @@ for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
 done
 
 run rm -rf "$KIT_HOME"; echo "✔ rimosso $KIT_HOME"
-if $PURGE; then run rm -rf "$CONF_DIR"; echo "✔ rimosso $CONF_DIR"; fi
+if $PURGE; then
+  run rm -rf "$CONF_DIR"; echo "✔ rimosso $CONF_DIR"
+  run rm -rf "$STATE_DIR"; echo "✔ rimosso $STATE_DIR"
+fi
 echo "Disinstallazione completata. Apri un nuovo terminale."
