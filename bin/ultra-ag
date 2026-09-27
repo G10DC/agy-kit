@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# ultra-ag: Claude Code in modalità ultracode che delega l'implementazione ad Antigravity.
+#   - Opus ($AGY_KIT_CLAUDE_MODEL, default opus) ragiona, scompone, verifica
+#   - ogni task atomico va a UltraCode di agy-kit (agy-ultracode: Gemini Pro + sotto-agenti Flash)
+#     tramite il relay `antigravity` (Haiku, un solo tool) e il bridge MCP claude/ag_bridge.py
+#   - Sonnet escluso (availableModels in claude/settings.json)
+# Uso:
+#   ultra-ag                        sessione interattiva
+#   ultra-ag --permission-mode auto ogni argomento passa invariato a claude
+#   ultra-ag -p "…" --allowedTools Workflow   non interattivo
+# Guida: docs/GUIDA_CLAUDE.md
+# ==============================================================================
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+. "$KIT_DIR/lib/common.sh"
+
+case "${1:-}" in
+  -h|--help)
+    sed -n '3,12p' "$src" | sed 's/^# \{0,1\}//'
+    exit 0 ;;
+esac
+
+CL="$KIT_DIR/claude"
+for f in ag_bridge.py agents.json policy.md settings.json; do
+  if [ ! -f "$CL/$f" ]; then
+    echo "ultra-ag: manca $CL/$f (reinstalla agy-kit con ./install.sh)" >&2
+    exit 1
+  fi
+done
+
+CLAUDE_BIN="${AGY_KIT_CLAUDE_BIN:-claude}"
+if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
+  echo "ultra-ag: Claude Code non trovato ($CLAUDE_BIN). Installalo o imposta AGY_KIT_CLAUDE_BIN in $AGY_KIT_CONFIG" >&2
+  exit 127
+fi
+# percorso reale dell'interprete (non uno shim di pyenv/asdf, che dipende dalla cartella)
+PY="$(python3 -c 'import sys; print(sys.executable if sys.version_info >= (3, 8) else "")' 2>/dev/null || true)"
+if [ -z "$PY" ]; then
+  echo "ultra-ag: serve python3 3.8 o successivo per il bridge verso Antigravity" >&2
+  exit 127
+fi
+agy_kit_require_bin
+
+# Configurazione MCP generata a ogni avvio (percorsi assoluti, escaping JSON corretto).
+MCP_JSON="$("$PY" -c '
+import json, sys
+print(json.dumps({"mcpServers": {"antigravity": {
+    "type": "stdio", "command": sys.argv[1], "args": [sys.argv[2]],
+    "timeout": 14400000, "alwaysLoad": True}}}))
+' "$PY" "$CL/ag_bridge.py")"
+
+exec "$CLAUDE_BIN" \
+  --model "$AGY_KIT_CLAUDE_MODEL" \
+  --effort ultracode \
+  --settings "$CL/settings.json" \
+  --mcp-config "$MCP_JSON" \
+  --agents "$(cat "$CL/agents.json")" \
+  --append-system-prompt-file "$CL/policy.md" \
+  "$@"

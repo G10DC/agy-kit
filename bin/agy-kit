@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agy-kit: gestione del kit UltraCode/Compendio per Antigravity.
+# agy-kit: gestione del kit UltraCode/Compendio per Antigravity (e ultra-ag per Claude Code).
 #   agy-kit doctor [--online]   verifica installazione (con --online prova anche il modello)
 #   agy-kit version             versione del kit
 #   agy-kit config              mostra la configurazione effettiva
@@ -37,7 +37,7 @@ doctor() {
   echo "  modello: $AGY_KIT_MODEL  effort: ${AGY_KIT_EFFORT:-(nessuno)}  skip-permissions: $AGY_KIT_SKIP_PERMISSIONS"
 
   echo "Comandi"
-  for c in agy-ultracode ultracode agy-compendio compendio compendio-verify agy-kit; do
+  for c in agy-ultracode ultracode agy-compendio compendio compendio-verify agy-kit ultra-ag; do
     local p; p="$(command -v "$c" 2>/dev/null || true)"
     if [ -z "$p" ]; then bad "$c non è nel PATH"; continue; fi
     if [ -x "$p" ]; then pass "$c → $p"; else bad "$c non eseguibile: $p"; fi
@@ -72,6 +72,29 @@ doctor() {
   done
   $found || wrn "nessun file rc contiene il blocco agy-kit"
 
+  echo "Claude Code (ultra-ag, opzionale)"
+  local claude_bin="${AGY_KIT_CLAUDE_BIN:-claude}" cver
+  if command -v "$claude_bin" >/dev/null 2>&1; then
+    cver="$("$claude_bin" --version 2>/dev/null | head -1)"
+    if printf '%s\n' "$cver" | awk 'NR==1 && $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+$/ {split($1,v,"."); ok=(v[1]+0>2)||(v[1]+0==2&&(v[2]+0>1||(v[2]+0==1&&v[3]+0>=280)))} END{exit !ok}'; then
+      pass "claude $cver"
+    else
+      wrn "claude ${cver:-?}: per ultra-ag serve 2.1.280 o successivo (claude update)"
+    fi
+  else
+    wrn "Claude Code non trovato: ultra-ag non è utilizzabile (il resto del kit sì)"
+  fi
+  if command -v python3 >/dev/null 2>&1 && [ -f "$KIT_DIR/claude/ag_bridge.py" ]; then
+    local bout
+    if bout="$(python3 "$KIT_DIR/claude/ag_bridge.py" --check 2>&1)"; then
+      pass "bridge Antigravity: configurazione valida ($(bridge_config_path))"
+    elif printf '%s' "$bout" | grep -q 'ERROR'; then
+      bad "bridge Antigravity: $(printf '%s' "$bout" | grep 'ERROR' | head -1 | sed 's/^ *//')"
+    else
+      wrn "bridge Antigravity: controlla gli avvisi di: python3 $KIT_DIR/claude/ag_bridge.py --check"
+    fi
+  fi
+
   if $online; then
     echo "Prova online (una richiesta minima al modello)"
     local out tmp pid watcher
@@ -104,6 +127,10 @@ doctor() {
   [ $fail -eq 0 ]
 }
 
+bridge_config_path() {
+  printf '%s\n' "${AG_BRIDGE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agy-kit/bridge.json}"
+}
+
 case "${1:-help}" in
   doctor)  shift; doctor "$@" ;;
   version) cat "$KIT_DIR/VERSION" ;;
@@ -113,6 +140,9 @@ case "${1:-help}" in
     echo "AGY_KIT_MODEL=$AGY_KIT_MODEL"
     echo "AGY_KIT_EFFORT=$AGY_KIT_EFFORT"
     echo "AGY_KIT_SKIP_PERMISSIONS=$AGY_KIT_SKIP_PERMISSIONS"
+    echo "AGY_KIT_CLAUDE_MODEL=$AGY_KIT_CLAUDE_MODEL"
+    echo "AGY_KIT_CLAUDE_BIN=${AGY_KIT_CLAUDE_BIN:-claude}"
+    echo "bridge:  $(bridge_config_path) $([ -f "$(bridge_config_path)" ] && echo '(presente)' || echo '(assente, uso i default)')"
     echo "KIT_DIR=$KIT_DIR" ;;
   help|-h|--help) sed -n '2,6p' "$src" | sed 's/^# \{0,1\}//' ;;
   *) echo "agy-kit: comando sconosciuto: $1" >&2; exit 2 ;;

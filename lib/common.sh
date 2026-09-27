@@ -6,7 +6,7 @@ AGY_KIT_CONFIG="${AGY_KIT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agy-kit/conf
 
 # Le variabili già presenti nell'ambiente (anche vuote) prevalgono sul file di config.
 _agy_kit_saved=""
-for _v in AGY_KIT_MODEL AGY_KIT_EFFORT AGY_KIT_SKIP_PERMISSIONS AGY_BIN; do
+for _v in AGY_KIT_MODEL AGY_KIT_EFFORT AGY_KIT_SKIP_PERMISSIONS AGY_BIN AGY_KIT_CLAUDE_MODEL AGY_KIT_CLAUDE_BIN; do
   if eval "[ -n \"\${$_v+x}\" ]"; then
     _agy_kit_saved="$_agy_kit_saved$_v=$(eval "printf '%q' \"\${$_v}\"");"
   fi
@@ -19,6 +19,8 @@ unset _v _agy_kit_saved
 AGY_KIT_MODEL="${AGY_KIT_MODEL:-gemini-3.1-pro}"
 AGY_KIT_EFFORT="${AGY_KIT_EFFORT-high}"   # vuoto = non passare --effort
 AGY_KIT_SKIP_PERMISSIONS="${AGY_KIT_SKIP_PERMISSIONS:-1}"
+# ultra-ag (Claude Code): modello della sessione che ragiona e orchestra
+AGY_KIT_CLAUDE_MODEL="${AGY_KIT_CLAUDE_MODEL:-opus}"
 
 agy_kit_find_bin() {
   if [ -n "${AGY_BIN:-}" ]; then

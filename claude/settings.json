@@ -1,0 +1,9 @@
+{
+  "availableModels": ["opus", "haiku"],
+  "permissions": {
+    "allow": ["mcp__antigravity__delegate"]
+  },
+  "env": {
+    "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS": "14400000"
+  }
+}
