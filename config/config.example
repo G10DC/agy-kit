@@ -17,3 +17,10 @@ AGY_KIT_PLAIN_SKIP_PERMISSIONS=0
 
 # Percorso del binario agy, se non è nel PATH
 #AGY_BIN="$HOME/.local/bin/agy"
+
+# --- ultra-ag: Claude Code che delega l'implementazione a UltraCode (docs/GUIDA_CLAUDE.md) ---
+# Modello di Claude Code che ragiona e orchestra (ultracode). Sonnet è escluso in ogni caso.
+#AGY_KIT_CLAUDE_MODEL=opus
+# Percorso di Claude Code, se non è nel PATH
+#AGY_KIT_CLAUDE_BIN="$HOME/.local/bin/claude"
+# Parallelismo, timeout e cartelle permesse del bridge: ~/.config/agy-kit/bridge.json

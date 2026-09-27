@@ -102,6 +102,48 @@ check "norma assente dalle fonti"      W-NORM  "Rientra nel D.P.R. 430/2001."
 check "norma come conoscenza esterna"  OK      "[CONOSCENZA ESTERNA] D.P.R. 430/2001."
 check "citazioni in codice ignorate"   OK      'Esempio: `[src/x.ts#L4]`'
 
+echo "ultra-ag (Claude Code)"
+# stub di claude: salva gli argomenti come JSON (alcuni contengono a capo)
+cat > "$T/claude" <<'EOF'
+#!/usr/bin/env python3
+import json, os, sys
+json.dump(sys.argv[1:], open(os.environ["STUB_CLAUDE_ARGS"], "w"))
+EOF
+chmod +x "$T/claude"
+export STUB_CLAUDE_ARGS="$T/claude-args.json"
+unset AGY_KIT_CLAUDE_MODEL AGY_KIT_CLAUDE_BIN
+cargs() {  # cargs <espressione python su a (lista argomenti)>
+  python3 -c "import json,sys; a=json.load(open(sys.argv[1])); print($1)" "$STUB_CLAUDE_ARGS"
+}
+AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" --permission-mode auto >/dev/null; rc=$?
+expect "avvio → exit 0" "0" "$rc"
+expect "modello opus ed effort ultracode" "--model opus --effort ultracode" "$(cargs '" ".join(a[:4])')"
+expect "settings e policy del kit" "$KIT/claude/settings.json|$KIT/claude/policy.md" \
+  "$(cargs 'a[a.index("--settings")+1]+"|"+a[a.index("--append-system-prompt-file")+1]')"
+expect "server MCP antigravity → claude/ag_bridge.py" "$KIT/claude/ag_bridge.py" \
+  "$(cargs 'json.loads(a[a.index("--mcp-config")+1])["mcpServers"]["antigravity"]["args"][0]')"
+expect "relay antigravity su haiku con un solo tool MCP" "haiku mcp__antigravity__delegate" \
+  "$(cargs '(lambda g: g["model"]+" "+g["tools"][0])(json.loads(a[a.index("--agents")+1])["antigravity"])')"
+expect "argomenti extra passati in coda" "--permission-mode auto" "$(cargs '" ".join(a[-2:])')"
+AGY_KIT_CLAUDE_MODEL=claude-opus-5-5 AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" >/dev/null
+expect "AGY_KIT_CLAUDE_MODEL rispettato" "claude-opus-5-5" "$(cargs 'a[1]')"
+AGY_KIT_CLAUDE_BIN="$T/manca" "$BASH_BIN" "$KIT/bin/ultra-ag" 2>/dev/null; expect "claude mancante → exit 127" "127" "$?"
+AGY_BIN="$T/nonexistent" AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" 2>/dev/null
+expect "agy mancante → exit 127" "127" "$?"
+"$BASH_BIN" "$KIT/bin/ultra-ag" -h | grep -q 'GUIDA_CLAUDE'; expect "-h mostra l'aiuto" "0" "$?"
+python3 -c 'import json,sys; [json.load(open(f)) for f in sys.argv[1:]]' \
+  "$KIT/claude/settings.json" "$KIT/claude/agents.json" "$KIT/claude/bridge.example.json"
+expect "JSON di claude/ validi" "0" "$?"
+expect "Sonnet escluso da availableModels" "False" \
+  "$(python3 -c 'import json,sys; print(any("sonnet" in m for m in json.load(open(sys.argv[1]))["availableModels"]))' "$KIT/claude/settings.json")"
+
+echo
+if python3 "$KIT/tests/test_bridge.py"; then
+  ok "bridge Claude Code → Antigravity (tests/test_bridge.py)"
+else
+  ko "bridge Claude Code → Antigravity" "dettagli qui sopra"
+fi
+
 echo
 echo "Esito: $pass superati, $fail falliti"
 [ $fail -eq 0 ]

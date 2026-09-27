@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# agy-kit installer — UltraCode + Compendio per Antigravity CLI (agy)
+# agy-kit installer — UltraCode + Compendio per Antigravity CLI (agy), ultra-ag per Claude Code
 #
 # Uso: ./install.sh [--dry-run] [--no-shell] [--no-skill]
 #
 # Cosa fa (idempotente, ogni file sostituito viene prima salvato in un backup):
 #   1. copia il kit in   $AGY_KIT_HOME   (default ~/.local/share/agy-kit)
 #   2. crea i comandi in $AGY_KIT_BIN_DIR (default ~/.local/bin):
-#        agy-ultracode, ultracode, agy-compendio, compendio, compendio-verify, agy-kit
+#        agy-ultracode, ultracode, agy-compendio, compendio, compendio-verify, agy-kit, ultra-ag
 #   3. installa la skill in ~/.gemini/config/skills/ultracode/
-#   4. crea ~/.config/agy-kit/config se assente
+#   4. crea ~/.config/agy-kit/config e bridge.json se assenti
 #   5. aggiunge a ~/.zshrc e/o ~/.bashrc un blocco "agy-kit" (PATH + funzione agy)
 #   6. esegue `agy-kit doctor`
 # Disinstallazione: ./uninstall.sh
@@ -53,6 +53,7 @@ echo
 
 # --- 0. prerequisiti ----------------------------------------------------------
 command -v python3 >/dev/null 2>&1 || echo "ATTENZIONE: python3 assente → compendio-verify non funzionerà." >&2
+command -v "${AGY_KIT_CLAUDE_BIN:-claude}" >/dev/null 2>&1 || echo "NOTA: Claude Code (claude) assente → ultra-ag non partirà finché non lo installi (opzionale)." >&2
 if ! command -v agy >/dev/null 2>&1 && [ ! -x "$BIN_DIR/agy" ]; then
   echo "ATTENZIONE: binario agy non trovato. Installa Antigravity CLI; il kit funzionerà appena agy sarà nel PATH" >&2
   echo "            (oppure imposta AGY_BIN in $CONF_DIR/config)." >&2
@@ -63,11 +64,11 @@ if [ "$SRC" != "$KIT_HOME" ]; then
   [ -e "$KIT_HOME" ] && backup "$KIT_HOME"
   run rm -rf "$KIT_HOME"
   run mkdir -p "$KIT_HOME"
-  for item in VERSION README.md bin lib shell skills docs config uninstall.sh install.sh tests; do
+  for item in VERSION README.md bin lib shell skills docs config claude uninstall.sh install.sh tests; do
     [ -e "$SRC/$item" ] && run cp -pR "$SRC/$item" "$KIT_HOME/"
   done
 fi
-run chmod +x "$KIT_HOME/bin/"* "$KIT_HOME/install.sh" "$KIT_HOME/uninstall.sh"
+run chmod +x "$KIT_HOME/bin/"* "$KIT_HOME/claude/ag_bridge.py" "$KIT_HOME/install.sh" "$KIT_HOME/uninstall.sh"
 echo "✔ kit copiato in $KIT_HOME"
 
 # --- 2. comandi ---------------------------------------------------------------
@@ -84,6 +85,7 @@ link agy-compendio   "$KIT_HOME/bin/agy-compendio"
 link compendio       "$KIT_HOME/bin/agy-compendio"
 link compendio-verify "$KIT_HOME/bin/compendio-verify"
 link agy-kit         "$KIT_HOME/bin/agy-kit"
+link ultra-ag        "$KIT_HOME/bin/ultra-ag"
 echo "✔ comandi collegati in $BIN_DIR"
 
 # --- 3. skill -----------------------------------------------------------------
@@ -105,6 +107,21 @@ if [ ! -f "$CONF_DIR/config" ]; then
   echo "✔ configurazione creata: $CONF_DIR/config"
 else
   echo "✔ configurazione esistente mantenuta: $CONF_DIR/config"
+fi
+if [ ! -f "$CONF_DIR/bridge.json" ]; then
+  run mkdir -p "$CONF_DIR"
+  # solo commenti: le chiavi assenti prendono i default del kit, che così restano aggiornabili
+  if $DRY; then echo "  [dry-run] crea $CONF_DIR/bridge.json"; else
+    cat > "$CONF_DIR/bridge.json" <<'JSON'
+{
+  "_help": "Bridge Claude Code -> Antigravity di agy-kit (ultra-ag). Qui vanno solo le chiavi che vuoi cambiare; le altre prendono il default del kit.",
+  "_help_esempio": "Chiavi e default: ~/.local/share/agy-kit/claude/bridge.example.json. Guida: docs/GUIDA_CLAUDE.md, sezione Configurazione."
+}
+JSON
+  fi
+  echo "✔ configurazione del bridge Claude Code creata: $CONF_DIR/bridge.json"
+else
+  echo "✔ configurazione del bridge esistente mantenuta: $CONF_DIR/bridge.json"
 fi
 
 # --- 5. shell -----------------------------------------------------------------
