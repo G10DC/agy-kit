@@ -8,6 +8,7 @@
 #                         percorso assoluto (default: COMPENDIO_INTEGRALE.md)
 #   -p, --print           esecuzione non interattiva (print mode, in primo piano)
 #       --no-verify       non eseguire compendio-verify al termine
+#       --force           consente di analizzare la home o la radice del disco
 #   -h, --help            mostra questo aiuto
 #
 # Esempi:
@@ -16,7 +17,11 @@
 #   compendio -o SINTESI.md -p       # nome personalizzato, non interattivo
 #
 # Regole epistemiche: skill `ultracode` (unica fonte, caricata con /ultracode).
-# Uscita: codice di agy se fallisce, altrimenti quello di compendio-verify.
+# I file che possono contenere segreti (.env, chiavi, .ssh/, …) vengono citati solo per nome.
+# Documenti di terzi: AGY_KIT_SANDBOX=1 nel config fa girare agy con --sandbox.
+# Uscita: 0 verifica superata, 1 errori di verifica, 2 argomenti non validi,
+#         3 file di destinazione non creato o non aggiornato,
+#         4 agy terminato con errore (il suo codice è nel messaggio), 127 agy o Python mancanti.
 # ==============================================================================
 set -euo pipefail
 
@@ -29,12 +34,13 @@ KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
 # shellcheck source=../lib/common.sh
 . "$KIT_DIR/lib/common.sh"
 
-usage() { sed -n '3,19p' "$src" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,24p' "$src" | sed 's/^# \{0,1\}//'; }
 
 OUTPUT_FILE="COMPENDIO_INTEGRALE.md"
-TARGET_DIR="$(pwd)"
+TARGET_DIR=""
 MODE="-i"
 VERIFY=true
+FORCE=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,9 +51,13 @@ while [ $# -gt 0 ]; do
       OUTPUT_FILE="$2"; shift 2 ;;
     -p|--print) MODE="-p"; shift ;;
     --no-verify) VERIFY=false; shift ;;
+    --force) FORCE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "compendio: opzione sconosciuta: $1 (vedi --help)" >&2; exit 2 ;;
     *)
+      if [ -n "$TARGET_DIR" ]; then
+        echo "compendio: indica una sola cartella (già indicata: $TARGET_DIR; in più: $1)" >&2; exit 2
+      fi
       if [ -d "$1" ]; then
         TARGET_DIR="$(cd "$1" && pwd)"; shift
       else
@@ -55,58 +65,115 @@ while [ $# -gt 0 ]; do
       fi ;;
   esac
 done
+[ -n "$TARGET_DIR" ] || TARGET_DIR="$(pwd)"
+
+# La home o la radice del disco contengono chiavi, token e file di altri programmi.
+if [ "$FORCE" = false ]; then
+  real_target="$(cd "$TARGET_DIR" && pwd -P)"
+  real_home="$(cd "$HOME" 2>/dev/null && pwd -P)" || real_home="$HOME"
+  refuse=false
+  case "$real_target" in /|"$real_home") refuse=true ;; esac
+  if agy_kit_is_windows; then
+    case "$real_target" in /[A-Za-z]|/cygdrive/[A-Za-z]) refuse=true ;; esac
+  fi
+  if [ "$refuse" = true ]; then
+    echo "compendio: non analizzo $TARGET_DIR (home o radice del disco): verrebbero letti anche file" >&2
+    echo "           con chiavi e credenziali. Indica una cartella più specifica oppure usa --force." >&2
+    exit 2
+  fi
+fi
 
 case "$OUTPUT_FILE" in
   /*) OUTPUT_PATH="$OUTPUT_FILE" ;;
+  [A-Za-z]:[\\/]*)   # percorso Windows assoluto (C:\… o C:/…)
+    if agy_kit_is_windows; then OUTPUT_PATH="$(cygpath -u "$OUTPUT_FILE")"; else OUTPUT_PATH="$TARGET_DIR/$OUTPUT_FILE"; fi ;;
   *)  OUTPUT_PATH="$TARGET_DIR/$OUTPUT_FILE" ;;
 esac
 if [ ! -d "$(dirname "$OUTPUT_PATH")" ]; then
   echo "compendio: la cartella di destinazione non esiste: $(dirname "$OUTPUT_PATH")" >&2; exit 2
 fi
 
+agy_kit_require_bin
+if [ "$VERIFY" = true ]; then
+  agy_kit_require_python compendio   # prima di agy: la verifica finale deve poter partire
+else
+  agy_kit_find_python || true
+fi
+
+# agy.exe su Windows non capisce i percorsi /c/…: nel prompt vanno in forma nativa,
+# e i comandi da far eseguire all'agente sono quelli della piattaforma.
+TARGET_N="$(agy_kit_native_path "$TARGET_DIR")"
+OUTPUT_N="$(agy_kit_native_path "$OUTPUT_PATH")"
+VERIFIER_N="$(agy_kit_native_path "$KIT_DIR/bin/compendio-verify")"
+PY_N="$(agy_kit_native_path "${AGY_KIT_PY:-python3}")"
+if agy_kit_is_windows; then
+  HASH_CMD="Get-FileHash -Algorithm SHA256 <file>"
+  TMP_HINT="una cartella temporanea creata sotto \$env:TEMP"
+  VERIFY_CMD="& \"${PY_N}\" \"${VERIFIER_N}\" \"${OUTPUT_N}\" --root \"${TARGET_N}\" --require-coverage
+   (sintassi PowerShell; in bash togli '& ')"
+else
+  if [ "$(uname -s)" = Darwin ] || ! command -v sha256sum >/dev/null 2>&1; then
+    HASH_CMD="shasum -a 256 <file>"
+  else
+    HASH_CMD="sha256sum <file>"
+  fi
+  TMP_HINT="una cartella temporanea creata con mktemp -d"
+  VERIFY_CMD="\"${PY_N}\" \"${VERIFIER_N}\" \"${OUTPUT_N}\" --root \"${TARGET_N}\" --require-coverage"
+fi
+
 TASK="Modalità COMPENDIO. Applica integralmente la skill ultracode (tiering dei modelli, tassonomia a 5 livelli, 6 Iron Rules, verifica deterministica).
 
-Cartella da analizzare: ${TARGET_DIR}
-File di destinazione: ${OUTPUT_PATH}
+Cartella da analizzare: ${TARGET_N}
+File di destinazione: ${OUTPUT_N}
 
 Obiettivo: una base di conoscenza unica, ad altissima fedeltà, di TUTTI i file della cartella (sottocartelle incluse; escludi solo il file di destinazione e cartelle tecniche come .git e node_modules), che mappi:
 - contenuto testuale, sorgente e strutturale di ogni file;
 - link, riferimenti interni ed esterni, contatti ed endpoint;
-- nomi dei file, percorsi e metadati reali (stat, shasum -a 256 eseguiti davvero);
+- nomi dei file, percorsi e metadati reali (dimensione e data rilevate con comandi reali; SHA-256 calcolato davvero con: ${HASH_CMD});
 - citazioni, vincoli contrattuali, formule, dipendenze;
 - relazioni tra le fonti e discrepanze.
 
-Vincolo: non creare né modificare altri file nella cartella analizzata oltre al file di destinazione. Per file di lavoro usa una cartella temporanea creata con mktemp -d, fuori dalla cartella analizzata, e cancellala alla fine.
+Segreti: non aprire, non leggere e non trascrivere i file che possono contenere credenziali: .env e .env.*, *.pem, *.key, id_rsa*, id_ed25519*, tutto ciò che sta in .ssh/, .aws/ e .gnupg/, .npmrc, .netrc, .pypirc, credentials*, *.kdbx, *.p12, *.pfx. Citali solo per nome nell'inventario, con la nota [ESCLUSO: possibile segreto], senza contenuto né hash. Se in un altro file trovi password, token o chiavi private, non riportarne il valore: scrivi [SEGRETO OMESSO].
+
+Vincolo: non creare né modificare altri file nella cartella analizzata oltre al file di destinazione. Per file di lavoro usa ${TMP_HINT}, fuori dalla cartella analizzata, e cancellala alla fine.
 
 Procedura:
 1. Censisci l'albero dei file con un comando reale e annota il totale.
 2. Delega la lettura analitica e l'estrazione verbatim a sotto-agenti con invoke_subagent e modello flash, in parallelo per gruppi di file. Tieni per te (Pro) sintesi, collegamenti, deduzioni e verifica.
 3. Normalizza e confronta i dati; raccogli le discrepanze in una sezione [VERIFICARE].
 4. Scrivi il file con: indice (TOC), scheda rapida, inventario dei file con metadati, schede tematiche, collegamenti incrociati, cronologia, registro delle deduzioni (ID, premessa, motivazione, confidenza), discrepanze [VERIFICARE], glossario, tabella di contatti e URL, appendice di metodo e limiti.
-5. Controlla che ogni file dell'albero del punto 1 sia coperto.
-6. Esegui: compendio-verify \"${OUTPUT_PATH}\" --root \"${TARGET_DIR}\" — correggi ogni ERROR e ripeti finché esce con codice 0. Riporta gli avvisi residui nella risposta finale."
+5. Controlla che ogni file dell'albero del punto 1 sia coperto (anche quelli esclusi come possibili segreti, citati per nome).
+6. Esegui la verifica deterministica:
+   ${VERIFY_CMD}
+   Correggi ogni ERROR (E-COV = file delle fonti non citato nel compendio) e ripeti finché esce con codice 0. Riporta gli avvisi residui nella risposta finale."
 
-agy_kit_require_bin
 agy_kit_base_flags
+
+# Firma del file di destinazione prima della sessione: se esisteva già, deve cambiare.
+signature() { if [ -f "$1" ]; then cksum < "$1"; fi; }
+before="$(signature "$OUTPUT_PATH")"
 
 cd "$TARGET_DIR"
 set +e
-"$AGY_BIN" "${BASE_FLAGS[@]}" "$MODE" "$(agy_kit_skill_prefix "$TASK")"
+agy_kit_run_agy "${BASE_FLAGS[@]}" "$MODE" "$(agy_kit_skill_prefix "$TASK")"
 status=$?
 set -e
 
 if [ $status -ne 0 ]; then
   echo "compendio: agy è terminato con codice $status" >&2
-  exit $status
+  exit 4
+fi
+if [ ! -f "$OUTPUT_PATH" ]; then
+  echo "compendio: il file di destinazione non è stato creato: $OUTPUT_PATH" >&2
+  exit 3
+fi
+if [ -n "$before" ] && [ "$(signature "$OUTPUT_PATH")" = "$before" ]; then
+  echo "compendio: il file di destinazione esisteva già e agy non l'ha aggiornato: $OUTPUT_PATH" >&2
+  exit 3
 fi
 
 if [ "$VERIFY" = true ]; then
-  if [ -f "$OUTPUT_PATH" ]; then
-    echo
-    echo "── compendio-verify ─────────────────────────────────────────────"
-    "$KIT_DIR/bin/compendio-verify" "$OUTPUT_PATH" --root "$TARGET_DIR"
-  else
-    echo "compendio: il file di destinazione non è stato creato: $OUTPUT_PATH" >&2
-    exit 3
-  fi
+  echo
+  echo "── compendio-verify ─────────────────────────────────────────────"
+  "$AGY_KIT_PY" "$KIT_DIR/bin/compendio-verify" "$OUTPUT_PATH" --root "$TARGET_DIR" --require-coverage
 fi

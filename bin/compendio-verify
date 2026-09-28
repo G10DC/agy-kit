@@ -1,16 +1,42 @@
 #!/usr/bin/env python3
 """compendio-verify: controlli deterministici su un compendio / base di conoscenza Markdown.
 
-Verifica ciò che un LLM non può garantire da solo (vedi Iron Rules della skill ultracode):
-  E-LINK   link Markdown / file:// verso file inesistenti
-  E-CIT    citazioni [file#Lnn] o [SIGLA#Lnn-Lmm] verso file inesistenti o righe fuori range
-  E-HASH   SHA-256 dichiarati che non corrispondono al file indicato (o a nessun file della cartella)
-  E-100    dichiarazioni di completezza "100%" / "INTEGRALE" con punti [VERIFICARE] aperti
-  W-DED    [DEDOTTO] senza livello di confidenza
-  W-NORM   riferimenti normativi (D.P.R., D.Lgs., art. ... c.c.) assenti dalle fonti testuali
-  W-PATH   percorsi assoluti in `backtick` che non esistono
+Verifica ciò che un LLM non può garantire da solo (vedi Iron Rules della skill ultracode).
 
-Uso:  compendio-verify FILE.md [--root DIR] [--json] [--quiet]
+Errori (fanno fallire la verifica, exit 1):
+  E-LINK   link Markdown / file:// verso file inesistenti, fuori dalla radice (--root) o al
+           compendio stesso
+  E-CIT    citazioni [file#Lnn], [SIGLA#Lnn-Lmm] o [doc.pdf p.N] verso file/sigle inesistenti,
+           fuori dalla radice, al compendio stesso, o righe/pagine fuori range
+  E-HASH   SHA-256 dichiarato accanto a un file nominato (tra backtick, in un link Markdown o
+           in una cella di tabella) che non corrisponde al file indicato
+  E-100    dichiarazioni di completezza "100%" / "INTEGRALE" / "copertura totale" con punti
+           [VERIFICARE] ancora aperti nel documento
+  E-COV    con --require-coverage: file delle fonti sotto --root mai citati nel compendio, o
+           compendio vuoto / senza alcuna citazione (senza l'opzione è l'avviso W-COV)
+
+Avvisi (non fanno fallire la verifica):
+  W-COV    senza --require-coverage: stessa segnalazione di E-COV, ma solo un avviso
+  W-DED    [DEDOTTO] senza un livello di confidenza esplicito (Alta/Media/Bassa/High/Medium/Low)
+           chiaramente associato (vicino a "confidenza" o tra parentesi)
+  W-NORM   riferimenti normativi (D.P.R., D.Lgs., D.L., Legge, art. c.c., Reg./Dir. UE) assenti
+           dalle fonti testuali (confronto tollerante a punteggiatura/spaziatura)
+  W-PATH   percorsi assoluti in `backtick` che non esistono
+  W-AMBIG  citazione o nome per basename che combacia con più file sotto la radice: valida se
+           lo è per almeno uno dei candidati, ma segnalata perché ambigua
+  W-BIN    citazione a righe (#Lnn) su un file binario/documentale non verificabile contando le
+           righe, o pagina PDF non verificabile perché pdfinfo/pdftotext non sono disponibili
+  W-HASH   SHA-256 senza alcun file nominato sulla riga che non corrisponde a nessun file sotto
+           la radice (non è un errore: potrebbe essere un hash citato verbatim da una fonte,
+           es. FROM immagine@sha256:..., checksum di lockfile)
+  W-FENCE  una recinzione ``` o ~~~ aperta non viene mai chiusa: il testo restante nel file è
+           escluso dai controlli (scelta conservativa: viene trattato come codice, non come
+           prosa, ma la mancata chiusura viene sempre segnalata)
+  W-CIT    etichetta tra parentesi quadre con #Lnn che non è né una sigla di legenda né un file
+           esistente, in un documento senza alcuna legenda (con una legenda, lo stesso caso è
+           E-CIT: vedi sopra)
+
+Uso:  compendio-verify FILE.md [--root DIR] [--require-coverage] [--json] [--quiet] [--all]
 Uscita: 0 = nessun errore (possibili avvisi), 1 = errori, 2 = uso errato.
 Solo libreria standard Python 3.8+.
 """
@@ -20,25 +46,50 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.parse
+import zipfile
 
 TEXT_EXT = {".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".tsv", ".html", ".htm", ".xml",
             ".js", ".mjs", ".ts", ".py", ".sh", ".zsh", ".toml", ".ini", ".cfg", ".conf", ".rst", ""}
+DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods", ".odp", ".rtf"}
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+MAX_LISTED_MISSING = 20
 
-RE_MDLINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
-RE_CIT_BLOCK = re.compile(r"\[([^\[\]]*#L\d+[^\[\]]*)\]")
-RE_CIT_ITEM = re.compile(r"([A-Za-z0-9_.\-/~ ]+?)?#L(\d+)(?:\s*[-–]\s*L?(\d+))?")
+RE_MDLINK = re.compile(r"\[[^\[\]]*\]\(([^)\s]+)\)")  # [^\[\]]: niente backtracking O(n²) su "[" non chiuse
+RE_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+RE_CIT_BLOCK = re.compile(r"\[([^\[\]]*(?:#L\d+|\bpp?\.\s?\d+)[^\[\]]*)\]")
+RE_CIT_SPLIT = re.compile(r"(?<=\d)\s*[;,]\s*")
+RE_CIT_LINE = re.compile(r"#?\s*L(\d+)(?:\s*[-–]\s*L?(\d+))?\s*$")
+RE_CIT_PAGE = re.compile(r"\bpp?\.\s?(\d+)(?:\s*[-–]\s*(\d+))?\s*$", re.IGNORECASE)
+RE_SIGLA_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_\-]*$")
 RE_CODESPAN = re.compile(r"`[^`\n]*`")
 RE_SHA256 = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 RE_BACKTICK = re.compile(r"`([^`\n]+)`")
 RE_SIGLA_ROW = re.compile(r"^\|\s*[*_]{1,2}([A-Za-z0-9][A-Za-z0-9_\-]*)[*_]{1,2}\s*\|\s*`([^`]+)`")
-RE_FULL = re.compile(r"(100\s?%|\bINTEGRAL[EI]\b|(?i:\b(?:integrale|completo|completa) al 100\b))")
-RE_CONF = re.compile(r"\b(Alta|Media|Bassa|High|Medium|Low)\b|\bD\d{2,3}\b|confidenz", re.IGNORECASE)
-RE_NORM = re.compile(r"(D\.?\s?P\.?\s?R\.?\s*(?:n\.\s*)?\d+/\d{2,4}|D\.?\s?Lgs\.?\s*(?:n\.\s*)?\d+/\d{2,4}"
-                     r"|art(?:t)?\.\s*\d+[a-z\-]*\s*(?:e\s*ss\.\s*)?c\.\s?c\.|L(?:egge)?\.?\s*n\.\s*\d+/\d{2,4})",
+RE_HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
+RE_NO_OPEN = re.compile(r"\bnessun[oa]?\b[^.\n]{0,40}\bapert[oa]\b", re.IGNORECASE)
+RE_100 = re.compile(r"(?<![\d.,])100\s?%")
+RE_INTEGRALE_WORD = re.compile(r"\bINTEGRAL[EI]\b")
+RE_TOTALE_DECL = re.compile(r"\bcopertura\s+total[ei]\b|\banalizzat[oi]\s+integralmente\b"
+                            r"|\bintegralmente\s+analizzat[oi]\b", re.IGNORECASE)
+KW_FOR_100 = re.compile(r"\b(copertura|completezz\w*|complet[oa]|analizzat\w*|verificat\w*|esaustiv\w*)\b",
+                        re.IGNORECASE)
+KW_FOR_INTEGRALE = re.compile(r"\b(copertura|completezz\w*|complet[oa]|analizzat\w*|verificat\w*|"
+                              r"esaustiv\w*|compendi\w*|analisi|revision\w*)\b", re.IGNORECASE)
+RE_CONF_LEVEL = re.compile(r"\b(alta|media|bassa|high|medium|low)\b", re.IGNORECASE)
+RE_CONF_WORD = re.compile(r"confidenz\w*", re.IGNORECASE)
+RE_CONF_PAREN = re.compile(r"\(\s*(alta|media|bassa|high|medium|low)\s*\)", re.IGNORECASE)
+RE_NORM = re.compile(r"(D\.?\s?P\.?\s?R\.?\s*(?:n\.?\s*)?\d+/\d{2,4}"
+                     r"|D\.?\s?Lgs\.?\s*(?:n\.?\s*)?\d+/\d{2,4}"
+                     r"|D\.?\s?L\.?\s*(?:n\.?\s*)?\d+/\d{2,4}"
+                     r"|art(?:t)?\.\s*\d+[a-z\-]*\s*(?:e\s*ss\.\s*)?c\.\s?c\."
+                     r"|Legge\s*(?:n\.?\s*)?\d+/\d{2,4}"
+                     r"|L\.?\s*n\.?\s*\d+/\d{2,4}"
+                     r"|Reg(?:olamento)?\.?\s*U\.?E\.?\s*\d+/\d{2,4}"
+                     r"|Dir(?:ettiva)?\.?\s*U\.?E\.?\s*\d+/\d{2,4})",
                      re.IGNORECASE)
 QUOTE_PAIRS = [("«", "»"), ("“", "”"), ('"', '"'), ("`", "`")]
 
@@ -48,9 +99,14 @@ def inside_quotes(line, start, end):
         left = line.rfind(o, 0, start)
         if left == -1:
             continue
+        if o != c and line.find(c, left + len(o), start) != -1:
+            continue  # quella citazione si è già chiusa prima di start: non racchiude il match
         right = line.find(c, end)
-        if right != -1 and (o != c or line.count(o, 0, start) % 2 == 1):
-            return True
+        if right == -1:
+            continue
+        if o == c and line.count(o, 0, start) % 2 == 0:
+            continue
+        return True
     return False
 
 
@@ -63,6 +119,9 @@ class Verifier:
         self.findings = []
         self._index = None
         self._hashes = {}
+        self._binary_cache = {}
+        self._pdf_pages = {}
+        self._ambig_warned = set()
         self._corpus = None
         self.sigle = self._parse_sigle()
         self.prose = [RE_CODESPAN.sub(lambda m: " " * len(m.group(0)), ln) for ln in self.lines]
@@ -87,6 +146,7 @@ class Verifier:
                     fence = None
                 continue
             mask.append(False)
+        self.fence_unclosed = fence is not None
         return mask
 
     def _parse_sigle(self):
@@ -98,40 +158,167 @@ class Verifier:
         return sigle
 
     def index(self):
+        """Indice {basename: [percorsi assoluti]} dei file REGOLARI sotto root, esclusi il file
+        verificato stesso, le cartelle tecniche e i nomi che iniziano con _backup."""
         if self._index is None:
             self._index = {}
             for d, dirs, files in os.walk(self.root):
                 dirs[:] = [x for x in dirs if x not in SKIP_DIRS and not x.startswith("_backup")]
                 for f in files:
                     p = os.path.join(d, f)
-                    if os.path.abspath(p) != self.path:
-                        self._index.setdefault(f, []).append(p)
+                    if os.path.abspath(p) == self.path:
+                        continue
+                    try:
+                        st = os.stat(p)
+                    except OSError:
+                        continue
+                    if not stat.S_ISREG(st.st_mode):
+                        continue
+                    self._index.setdefault(f, []).append(p)
         return self._index
 
-    def resolve(self, ref):
-        ref = ref.strip().strip("`").strip()
+    def resolve_all(self, ref):
+        """Risolve un riferimento a un file sotto root.
+        Ritorna (candidati, stato) con stato in:
+          'ok'        un solo file valido (percorso diretto, o unico match per basename)
+          'ambiguous' più file combaciano per solo nome (nessuna cartella nel riferimento)
+          'self'      il riferimento punta al compendio verificato stesso
+          'outside'   il percorso esiste ma è fuori dalla radice (root)
+          'none'      nessun file combacia (o non è un file regolare)
+        Un percorso con cartelle che non esiste non ripiega MAI sulla ricerca per basename
+        (COMP-4): il ripiego vale solo per un nome semplice.
+        """
+        ref = (ref or "").strip().strip("`").strip()
         if not ref:
-            return None
+            return [], "none"
         if ref in self.sigle:
             ref = self.sigle[ref]
         ref = os.path.expanduser(urllib.parse.unquote(ref))
+        if not ref:
+            return [], "none"
+        has_sep = "/" in ref or "\\" in ref
+        root_real = os.path.normcase(os.path.realpath(self.root))
+        self_real = os.path.normcase(os.path.realpath(self.path))
+
+        def check(cand):
+            if not os.path.exists(cand):
+                return None
+            try:
+                st = os.stat(cand)
+            except OSError:
+                return None
+            if not stat.S_ISREG(st.st_mode):
+                return None
+            real_nc = os.path.normcase(os.path.realpath(cand))
+            if real_nc == self_real:
+                return "self"
+            try:
+                common = os.path.commonpath([root_real, real_nc])
+            except ValueError:
+                common = None
+            if common != root_real:
+                return "outside"
+            return "ok"
+
         if os.path.isabs(ref):
-            return ref if os.path.exists(ref) else None
-        for base in (os.path.dirname(self.path), self.root):
+            kind = check(ref)
+            return ([ref], kind) if kind else ([], "none")
+
+        for base in (self.root, os.path.dirname(self.path)):
             cand = os.path.normpath(os.path.join(base, ref))
-            if os.path.exists(cand):
-                return cand
-        hits = self.index().get(os.path.basename(ref), [])
-        return hits[0] if len(hits) == 1 else (hits[0] if hits else None)
+            kind = check(cand)
+            if kind:
+                return [cand], kind
+
+        if has_sep:
+            return [], "none"
+
+        hits = [h for h in self.index().get(os.path.basename(ref), [])
+                if os.path.normcase(os.path.realpath(h)) != self_real]
+        if not hits:
+            return [], "none"
+        if len(hits) == 1:
+            return hits, "ok"
+        return hits, "ambiguous"
+
+    def resolve_ref(self, ref, lineno):
+        """Come resolve_all, ma segnala W-AMBIG (una sola volta per riga+riferimento) quando lo
+        stato è 'ambiguous'."""
+        cands, status = self.resolve_all(ref)
+        if status == "ambiguous":
+            key = (lineno, ref)
+            if key not in self._ambig_warned:
+                self._ambig_warned.add(key)
+                shown = ", ".join(os.path.relpath(c, self.root) for c in cands[:5])
+                extra = f" (+altri {len(cands) - 5})" if len(cands) > 5 else ""
+                self.add("WARN", "W-AMBIG", lineno,
+                         f"nome ambiguo, {len(cands)} file corrispondono a '{ref}': {shown}{extra}")
+        return cands, status
+
+    def resolve_plain(self, ref):
+        """Risoluzione semplice per W-PATH: solo esistenza sul disco, senza vincolo di radice
+        (un percorso assoluto citato in un `backtick` può legittimamente puntare fuori dal
+        progetto: qui si vuole solo scoprire refusi)."""
+        ref = os.path.expanduser(urllib.parse.unquote(ref.strip().strip("`").strip()))
+        return ref if ref and os.path.exists(ref) else None
 
     def sha(self, p):
         if p not in self._hashes:
-            h = hashlib.sha256()
-            with open(p, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    h.update(chunk)
-            self._hashes[p] = h.hexdigest()
+            try:
+                h = hashlib.sha256()
+                with open(p, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        h.update(chunk)
+                self._hashes[p] = h.hexdigest()
+            except OSError:
+                self._hashes[p] = None
         return self._hashes[p]
+
+    def is_binary(self, p):
+        if p not in self._binary_cache:
+            ext = os.path.splitext(p)[1].lower()
+            if ext in DOC_EXTS:
+                self._binary_cache[p] = True
+            else:
+                try:
+                    with open(p, "rb") as fh:
+                        chunk = fh.read(1024)
+                    self._binary_cache[p] = b"\x00" in chunk
+                except OSError:
+                    self._binary_cache[p] = False
+        return self._binary_cache[p]
+
+    def pdf_pages(self, p):
+        if p not in self._pdf_pages:
+            n = None
+            if shutil.which("pdfinfo"):
+                try:
+                    out = subprocess.run(["pdfinfo", p], capture_output=True, text=True,
+                                         timeout=30).stdout
+                    m = re.search(r"^Pages:\s*(\d+)", out, re.MULTILINE)
+                    if m:
+                        n = int(m.group(1))
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            if n is None and shutil.which("pdftotext"):
+                try:
+                    out = subprocess.run(["pdftotext", p, "-"], capture_output=True, text=True,
+                                         timeout=60).stdout
+                    if out:
+                        n = out.count("\f") or 1
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            self._pdf_pages[p] = n
+        return self._pdf_pages[p]
+
+    @staticmethod
+    def _docx_text(p):
+        try:
+            with zipfile.ZipFile(p) as zf:
+                xml = zf.read("word/document.xml").decode("utf-8", "ignore")
+            return re.sub(r"<[^>]+>", " ", xml)
+        except (OSError, KeyError, zipfile.BadZipFile):
+            return ""
 
     def corpus(self):
         if self._corpus is None:
@@ -146,19 +333,34 @@ class Verifier:
                         except (OSError, subprocess.SubprocessError):
                             pass
                         continue
-                    if ext in TEXT_EXT and os.path.getsize(p) < 5_000_000:
+                    if ext == ".docx":
+                        parts.append(self._docx_text(p))
+                        continue
+                    if ext in TEXT_EXT:
                         try:
+                            if os.path.getsize(p) >= 5_000_000:
+                                continue
                             with open(p, encoding="utf-8", errors="ignore") as fh:
                                 parts.append(fh.read())
                         except OSError:
-                            pass
+                            continue
             self._corpus = re.sub(r"\s+", " ", "\n".join(parts)).lower()
         return self._corpus
 
     @staticmethod
-    def nlines(p):
-        with open(p, "rb") as fh:
-            data = fh.read()
+    def _canon_norm(s):
+        s = s.lower()
+        s = re.sub(r"[.,]", "", s)
+        s = re.sub(r"\bn\b", "", s)
+        s = re.sub(r"\s+", "", s)
+        return s
+
+    def nlines(self, p):
+        try:
+            with open(p, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return None
         return data.count(b"\n") + (0 if data.endswith(b"\n") or not data else 1)
 
     # ---------- checks ----------
@@ -168,104 +370,246 @@ class Verifier:
                 continue
             for m in RE_MDLINK.finditer(ln):
                 tgt = m.group(1)
-                if tgt.startswith(("http://", "https://", "mailto:", "#", "tel:")):
+                if tgt.startswith("//") or RE_SCHEME.match(tgt):
                     continue
                 path = tgt[len("file://"):] if tgt.startswith("file://") else tgt
                 path = path.split("#", 1)[0]
                 if not path or not (tgt.startswith("file://") or "/" in path or "." in path):
                     continue  # testo trascritto tipo [link](FEA): non è un percorso
-                if self.resolve(path) is None:
+                cands, status = self.resolve_ref(path, i)
+                if status == "self":
+                    self.add("ERROR", "E-LINK", i, f"link al compendio stesso: {tgt}")
+                elif status == "outside":
+                    self.add("ERROR", "E-LINK", i, f"link a percorso fuori dalla radice: {tgt}")
+                elif status == "none":
                     self.add("ERROR", "E-LINK", i, f"link a percorso inesistente: {tgt}")
+
+    def _citation_parts(self, block_text):
+        last_file = None
+        for part in RE_CIT_SPLIT.split(block_text):
+            part = part.strip()
+            if not part:
+                continue
+            m_line = RE_CIT_LINE.search(part)
+            m_page = None if m_line else RE_CIT_PAGE.search(part)
+            m = m_line or m_page
+            if not m:
+                continue
+            prefix = part[:m.start()].strip()
+            if prefix.endswith("#"):
+                prefix = prefix[:-1].strip()
+            if prefix:
+                ref = prefix
+                last_file = ref
+            elif last_file:
+                ref = last_file
+            else:
+                continue
+            yield part, ref, m, m is m_page
 
     def check_citations(self):
         for i, ln in enumerate(self.prose, 1):
             if self.code_mask[i - 1]:
                 continue
             for blk in RE_CIT_BLOCK.finditer(ln):
-                last_file = None
-                for part in re.split(r"[;,]", blk.group(1)):
-                    part = part.strip()
-                    m = RE_CIT_ITEM.search(part)
-                    if not m:
-                        continue
-                    ref = (m.group(1) or "").strip()
-                    if ref:
-                        last_file = ref
-                    elif last_file:
-                        ref = last_file
-                    else:
-                        continue
-                    ref_clean = ref.lstrip("#").strip()
-                    target = self.resolve(ref_clean)
-                    if target is None or os.path.isdir(target):
-                        if not re.search(r"[./]", ref_clean) and ref_clean not in self.sigle:
-                            continue  # etichetta non risolvibile (es. testo libero) -> ignora
-                        self.add("ERROR", "E-CIT", i, f"citazione a fonte non trovata: [{part}]")
-                        continue
-                    n = self.nlines(target)
-                    a = int(m.group(2))
-                    b = int(m.group(3)) if m.group(3) else a
-                    if a < 1 or max(a, b) > n or b < a:
-                        self.add("ERROR", "E-CIT", i,
-                                 f"righe fuori range in [{part}]: {os.path.basename(target)} ha {n} righe")
+                for part, ref, m, is_page in self._citation_parts(blk.group(1)):
+                    self._check_one_citation(i, part, ref, m, is_page)
+
+    def _check_one_citation(self, i, part, ref, m, is_page):
+        cands, status = self.resolve_ref(ref, i)
+        if status == "self":
+            self.add("ERROR", "E-CIT", i, f"citazione al compendio stesso: [{part}]")
+            return
+        if status == "outside":
+            self.add("ERROR", "E-CIT", i, f"citazione a fonte fuori dalla radice: [{part}]")
+            return
+        if status == "none":
+            if RE_SIGLA_TOKEN.match(ref):
+                msg = f"etichetta non risolta (né sigla in legenda né file esistente): [{part}]"
+                if self.sigle:
+                    self.add("ERROR", "E-CIT", i, msg)
+                else:
+                    self.add("WARN", "W-CIT", i, msg)
+            else:
+                self.add("ERROR", "E-CIT", i, f"citazione a fonte non trovata: [{part}]")
+            return
+        if is_page:
+            a = int(m.group(1))
+            b = int(m.group(2)) if m.group(2) else a
+            checked_any = False
+            ok_any = False
+            for t in cands:
+                if os.path.splitext(t)[1].lower() != ".pdf":
+                    continue
+                n = self.pdf_pages(t)
+                if n is None:
+                    continue
+                checked_any = True
+                if 1 <= a <= n and a <= b <= n:
+                    ok_any = True
+            if not checked_any:
+                self.add("WARN", "W-BIN", i,
+                         f"pagina non verificabile (pdfinfo/pdftotext non disponibile o file "
+                         f"illeggibile): [{part}]")
+            elif not ok_any:
+                self.add("ERROR", "E-CIT", i, f"pagina fuori intervallo in [{part}]")
+            return
+        a = int(m.group(1))
+        b = int(m.group(2)) if m.group(2) else a
+        if b < a:
+            self.add("ERROR", "E-CIT", i, f"intervallo di righe invertito in [{part}]")
+            return
+        ok_any = False
+        any_binary = False
+        checked_any = False
+        details = []
+        for t in cands:
+            if self.is_binary(t):
+                any_binary = True
+                continue
+            n = self.nlines(t)
+            if n is None:
+                continue
+            checked_any = True
+            details.append((t, n))
+            if a >= 1 and max(a, b) <= n:
+                ok_any = True
+        if ok_any:
+            return
+        if any_binary and not checked_any:
+            self.add("WARN", "W-BIN", i, f"citazione a righe su file binario, non verificabile: [{part}]")
+        elif checked_any:
+            names = ", ".join(f"{os.path.basename(t)} ha {n} righe" for t, n in details)
+            self.add("ERROR", "E-CIT", i, f"righe fuori range in [{part}]: {names}")
+        else:
+            self.add("ERROR", "E-CIT", i, f"fonte illeggibile per [{part}]")
+
+    def named_files_on_line(self, ln, lineno):
+        names = []
+        for bt in RE_BACKTICK.findall(ln):
+            names.append(bt)
+        for m in RE_MDLINK.finditer(ln):
+            tgt = m.group(1).split("#", 1)[0]
+            if tgt and not (tgt.startswith("//") or RE_SCHEME.match(tgt)):
+                names.append(tgt)
+        if ln.count("|") >= 2:
+            for cell in ln.strip().split("|"):
+                cell = cell.strip().strip("`*_").strip()
+                if cell and not RE_SHA256.fullmatch(cell):
+                    names.append(cell)
+        resolved = []
+        seen = set()
+        for n in names:
+            n = n.strip().strip("`").strip()
+            if not n or RE_SHA256.fullmatch(n):
+                continue
+            cands, status = self.resolve_ref(n, lineno)
+            if status in ("ok", "ambiguous"):
+                for c in cands:
+                    if c not in seen:
+                        seen.add(c)
+                        resolved.append(c)
+        return resolved
 
     def check_hashes(self):
         all_hashes = None
         for i, ln in enumerate(self.lines, 1):
+            if self.code_mask[i - 1]:
+                continue  # E-HASH ignora il codice, anche nei blocchi recintati
             for m in RE_SHA256.finditer(ln):
                 h = m.group(0).lower()
-                named = []
-                for bt in RE_BACKTICK.findall(ln):
-                    if bt.lower() == h:
-                        continue
-                    p = self.resolve(bt)
-                    if p and os.path.isfile(p):
-                        named.append(p)
+                named = self.named_files_on_line(ln, i)
                 if named:
-                    if not any(self.sha(p) == h for p in named):
-                        real = ", ".join(f"{os.path.basename(p)}={self.sha(p)[:12]}…" for p in named)
+                    shas = [(p, self.sha(p)) for p in named]
+                    valid = [s for _, s in shas if s is not None]
+                    if not valid:
+                        continue  # file nominati illeggibili: nessun confronto possibile
+                    if h not in valid:
+                        real = ", ".join(f"{os.path.basename(p)}={s[:12]}…" for p, s in shas if s)
                         self.add("ERROR", "E-HASH", i, f"SHA-256 {h[:12]}… non corrisponde a {real}")
                     continue
                 if all_hashes is None:
-                    all_hashes = {self.sha(p) for pl in self.index().values() for p in pl
-                                  if os.path.getsize(p) < 500_000_000}
+                    all_hashes = set()
+                    for pl in self.index().values():
+                        for p in pl:
+                            try:
+                                if os.path.getsize(p) > 500_000_000:
+                                    continue
+                            except OSError:
+                                continue
+                            s = self.sha(p)
+                            if s:
+                                all_hashes.add(s)
                 if h not in all_hashes:
-                    self.add("ERROR", "E-HASH", i,
-                             f"SHA-256 {h[:12]}… non corrisponde ad alcun file sotto {self.root}")
+                    self.add("WARN", "W-HASH", i,
+                             f"SHA-256 {h[:12]}… senza un file nominato sulla riga, e non "
+                             f"corrisponde ad alcun file sotto {self.root}")
 
     def check_completeness(self):
-        open_points = sum(ln.count("[VERIFICARE]") for ln in self.prose)
+        open_points = 0
+        for i, ln in enumerate(self.prose, 1):
+            if self.code_mask[i - 1] or RE_HEADING.match(ln):
+                continue
+            cnt = ln.count("[VERIFICARE]")
+            if cnt and not RE_NO_OPEN.search(ln):
+                open_points += cnt
         seen = set()
         for i, ln in enumerate(self.prose, 1):
             if self.code_mask[i - 1]:
                 continue
-            for m in RE_FULL.finditer(ln):
-                if inside_quotes(ln, m.start(), m.end()):
-                    continue
-                if (i, "E-100") in seen:
-                    continue
-                seen.add((i, "E-100"))
-                if open_points:
-                    self.add("ERROR", "E-100", i,
-                             f"dichiarazione di completezza «{m.group(0)}» con {open_points} punti [VERIFICARE] aperti")
-                else:
-                    self.add("WARN", "E-100", i, f"dichiarazione di completezza «{m.group(0)}»: verificarla")
+            if RE_CIT_BLOCK.search(ln):
+                continue  # riga con citazione a fonte: è un dato, non una dichiarazione
+            match_text = None
+            m_tot = RE_TOTALE_DECL.search(ln)
+            if m_tot and not inside_quotes(ln, m_tot.start(), m_tot.end()):
+                match_text = m_tot.group(0)
+            if match_text is None:
+                for m in RE_100.finditer(ln):
+                    if inside_quotes(ln, m.start(), m.end()):
+                        continue
+                    if KW_FOR_100.search(ln):
+                        match_text = m.group(0)
+                        break
+            if match_text is None:
+                for m in RE_INTEGRALE_WORD.finditer(ln):
+                    if inside_quotes(ln, m.start(), m.end()):
+                        continue
+                    if KW_FOR_INTEGRALE.search(ln):
+                        match_text = m.group(0)
+                        break
+            if match_text is None or (i, "E-100") in seen:
+                continue
+            seen.add((i, "E-100"))
+            if open_points:
+                self.add("ERROR", "E-100", i,
+                         f"dichiarazione di completezza «{match_text}» con {open_points} punti "
+                         f"[VERIFICARE] aperti")
+            else:
+                self.add("WARN", "E-100", i, f"dichiarazione di completezza «{match_text}»: verificarla")
 
     def check_deductions(self):
         for i, ln in enumerate(self.prose, 1):
-            if "[DEDOTTO]" in ln and not self.code_mask[i - 1] and not RE_CONF.search(ln):
-                self.add("WARN", "W-DED", i, "[DEDOTTO] senza livello di confidenza (Alta/Media/Bassa)")
+            if "[DEDOTTO]" not in ln or self.code_mask[i - 1]:
+                continue
+            level = RE_CONF_LEVEL.search(ln)
+            associated = level and (RE_CONF_WORD.search(ln) or RE_CONF_PAREN.search(ln))
+            if not associated:
+                self.add("WARN", "W-DED", i,
+                         "[DEDOTTO] senza livello di confidenza esplicito (Alta/Media/Bassa)")
 
     def check_norms(self):
+        corpus_canon = None
         for i, ln in enumerate(self.prose, 1):
             if self.code_mask[i - 1] or "[CONOSCENZA ESTERNA]" in ln:
                 continue
             for m in RE_NORM.finditer(ln):
-                ref = re.sub(r"\s+", " ", m.group(0)).lower()
-                if ref not in self.corpus():
+                if corpus_canon is None:
+                    corpus_canon = self._canon_norm(self.corpus())
+                needle = self._canon_norm(m.group(0))
+                if needle and needle not in corpus_canon:
                     self.add("WARN", "W-NORM", i,
                              f"riferimento normativo «{m.group(0)}» non trovato nelle fonti testuali "
-                             f"({'PDF inclusi' if shutil.which('pdftotext') else 'PDF non letti: installare pdftotext'}): "
+                             f"({'PDF/DOCX inclusi' if shutil.which('pdftotext') else 'PDF non letti: installare pdftotext'}): "
                              f"se non è nelle fonti, etichettarlo [CONOSCENZA ESTERNA]")
 
     def check_paths(self):
@@ -273,10 +617,49 @@ class Verifier:
             if self.code_mask[i - 1]:
                 continue
             for bt in RE_BACKTICK.findall(ln):
-                if re.match(r"^(/Users/|/home/|~/)[^\s*?{}<>|…]+$", bt) and self.resolve(bt) is None:
+                if re.match(r"^(/Users/|/home/|~/)[^\s*?{}<>|…]+$", bt) and self.resolve_plain(bt) is None:
                     self.add("WARN", "W-PATH", i, f"percorso inesistente: {bt}")
 
-    def run(self):
+    def check_fence(self):
+        if self.fence_unclosed:
+            self.add("WARN", "W-FENCE", len(self.lines),
+                     "recinzione ``` o ~~~ aperta e mai chiusa: il testo che segue è escluso dai "
+                     "controlli (comportamento conservativo); chiudi la recinzione per farlo verificare")
+
+    def check_coverage(self, require):
+        all_files = sorted({p for pl in self.index().values() for p in pl})
+        if not all_files:
+            return
+        text = "\n".join(self.lines)
+        text_l = text.lower()
+        has_any_citation = bool(RE_CIT_BLOCK.search(text)) or any(
+            os.path.basename(p).lower() in text_l for p in all_files)
+        sev, code = ("ERROR", "E-COV") if require else ("WARN", "W-COV")
+        if not text.strip() or not has_any_citation:
+            self.add(sev, code,
+                     0, f"il compendio è vuoto o non cita/inventaria nessuna fonte sotto {self.root} "
+                        f"({len(all_files)} file attesi)")
+            return
+        missing = []
+        for p in all_files:
+            rel = os.path.relpath(p, self.root).replace(os.sep, "/")
+            name = os.path.basename(p)
+            if rel.lower() in text_l or name.lower() in text_l:
+                continue
+            if re.search(r"\[escluso[^\]]*" + re.escape(name.lower()) + r"[^\]]*\]", text_l):
+                continue
+            missing.append(rel)
+        if not missing:
+            return
+        shown = missing[:MAX_LISTED_MISSING]
+        extra = len(missing) - len(shown)
+        msg = (f"{len(missing)}/{len(all_files)} file delle fonti mai citati/inventariati nel "
+               f"compendio: " + ", ".join(shown))
+        if extra > 0:
+            msg += f" (+altri {extra})"
+        self.add(sev, code, 0, msg)
+
+    def run(self, require_coverage=False):
         self.check_links()
         self.check_citations()
         self.check_hashes()
@@ -284,6 +667,8 @@ class Verifier:
         self.check_deductions()
         self.check_norms()
         self.check_paths()
+        self.check_fence()
+        self.check_coverage(require_coverage)
         self.findings.sort(key=lambda f: (f["severity"] != "ERROR", f["line"]))
         return self.findings
 
@@ -293,6 +678,8 @@ def main():
                                  description="Controlli deterministici anti-allucinazione su un compendio Markdown.")
     ap.add_argument("file")
     ap.add_argument("--root", help="cartella delle fonti (default: cartella del file)")
+    ap.add_argument("--require-coverage", action="store_true",
+                    help="i file delle fonti mai citati nel compendio sono errori (E-COV) invece di avvisi (W-COV)")
     ap.add_argument("--json", action="store_true", help="output JSON")
     ap.add_argument("--quiet", action="store_true", help="mostra solo gli errori")
     ap.add_argument("--all", action="store_true", help="non raggruppare gli avvisi ripetuti (default: max 8 per tipo)")
@@ -305,7 +692,7 @@ def main():
         print(f"compendio-verify: cartella non trovata: {root}", file=sys.stderr)
         return 2
     v = Verifier(a.file, root)
-    findings = v.run()
+    findings = v.run(require_coverage=a.require_coverage)
     errors = [f for f in findings if f["severity"] == "ERROR"]
     warns = [f for f in findings if f["severity"] == "WARN"]
     if a.json:
