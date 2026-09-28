@@ -87,7 +87,7 @@ def setup():
     os.chmod(AGY, 0o755)
     with open(CONFIG, "w") as fh:  # nessun "command": si usa il default (agy-ultracode del kit)
         json.dump({"max_parallel": 2, "task_timeout_minutes": 5, "queue_wait_minutes": 5,
-                   "log_dir": BLOGS, "keep_logs": 5}, fh)
+                   "log_dir": BLOGS, "keep_logs": 5, "answer_max_chars": 500}, fh)
 
 
 def cleanup():
@@ -258,6 +258,19 @@ def test_cli():
     check(rep.get("status") == "error" and "127" in rep.get("summary", ""),
           "agy mancante → error con il messaggio di agy-ultracode", rep)
 
+    cp = cli("--run", "SCENARIO=answer", "--cwd", REPO, "--mode", "read-only")
+    rep = report(cp)
+    check(cp.returncode == 0 and rep.get("status") == "done" and "dati.csv" in rep.get("answer", "")
+          and rep.get("sources") == ["dati.csv", "https://example.com/doc"],
+          "--run --mode read-only passa la modalità e restituisce answer/sources", rep)
+    prompt = last_fake_argv()["argv"][-1]
+    check("READ-ONLY" in prompt and "Do not commit" not in prompt,
+          "--run --mode read-only usa il preambolo di sola lettura", prompt[:400])
+
+    cp = cli("--run", "SCENARIO=ok", "--cwd", REPO, "--mode", "bogus")
+    check(cp.returncode == 2, "--run --mode con valore non valido → argparse rifiuta (exit 2)",
+          cp.stdout + cp.stderr)
+
     if WINDOWS:
         cp = cli("--run", "SCENARIO=ok cartella scritta da Git Bash", "--cwd", msys(REPO))
         check(report(cp).get("status") == "done" and same_path(last_fake_argv()["cwd"], REPO),
@@ -354,7 +367,8 @@ def test_windows_native_stdin_prompt():
 
     sys.path.insert(0, os.path.dirname(BRIDGE))
     import ag_bridge as ab
-    built = ab.PREAMBLE.format(cwd=os.path.realpath(REPO)) + "\n--- TASK ---\n" + task.strip() + "\n--- END TASK ---\n"
+    built = (ab.PREAMBLES["edit"].format(cwd=os.path.realpath(REPO))
+             + "\n--- TASK ---\n" + task.strip() + "\n--- END TASK ---\n")
     # "-p" senza valore legge il prompt da stdin con $(cat) (già così per l'uso interattivo da
     # tastiera, non introdotto da BL-1): la sostituzione di comando toglie l'ultimo a capo.
     expected = "/ultracode " + built.rstrip("\n")
@@ -474,6 +488,73 @@ def test_mcp():
         is_err, rep = c.delegate("SCENARIO=ok", conversation_id=bad)
         check(is_err and rep.get("status") == "error" and "conversation_id" in rep.get("summary", "")
               and len(fake_pids()) == before, "conversation_id %r (sembra un flag) rifiutato" % bad, rep)
+
+    for bad in ("weird", "Edit", "READ-ONLY", ""):
+        before = len(fake_pids())
+        is_err, rep = c.delegate("SCENARIO=ok", mode=bad)
+        check(is_err and rep.get("status") == "error" and rep.get("retryable") is False
+              and "mode" in rep.get("summary", "") and len(fake_pids()) == before,
+              "mode %r non valido → error non ritentabile, agy non avviato" % bad, rep)
+
+    is_err, rep = c.delegate("SCENARIO=ok", mode="edit")
+    check(is_err is False and rep.get("status") == "done", "mode \"edit\" esplicito → comportamento normale", rep)
+
+    # answer e sources nel report; nessun falso positivo di unexpected_changes su un task read-only pulito
+    is_err, rep = c.delegate("SCENARIO=answer", mode="read-only")
+    check(is_err is False and rep.get("status") == "done"
+          and "dati.csv" in rep.get("answer", "") and "Risultato" in rep.get("answer", "")
+          and rep.get("sources") == ["dati.csv", "https://example.com/doc"]
+          and rep.get("files_changed") in (None, [])
+          and "unexpected_changes" not in rep,
+          "read-only pulito: answer e sources nel report, nessun falso positivo", rep)
+    prompt = last_fake_argv()["argv"][-1]
+    check("READ-ONLY" in prompt and "do not create, modify, move or delete" in prompt
+          and "Do not commit, push" not in prompt,
+          "preambolo read-only usato per un task in mode read-only", prompt[:500])
+
+    is_err, rep = c.delegate("SCENARIO=ok crea un file", mode="edit")
+    prompt = last_fake_argv()["argv"][-1]
+    check(is_err is False and "Do not commit, push" in prompt and "READ-ONLY" not in prompt,
+          "preambolo edit usato (e invariato) per un task in mode edit (default)", prompt[:500])
+
+    # answer molto lunga: troncata nel report, salvata per intero in answer_file
+    answer_len = 4000  # > answer_max_chars (500) della config di test
+    is_err, rep = c.delegate("SCENARIO=longanswer LEN=%d" % answer_len)
+    full_expected = "START-OF-ANSWER\n" + ("x" * answer_len) + "\nEND-OF-ANSWER"
+    check(is_err is False and rep.get("status") == "done" and len(rep.get("answer", "")) <= 500
+          and "truncated" in rep.get("answer", "") and rep.get("answer_file"),
+          "answer lunga troncata nel report, con answer_file", rep)
+    answer_file = rep.get("answer_file")
+    if answer_file and os.path.exists(answer_file):
+        with open(answer_file, encoding="utf-8") as fh:
+            saved = fh.read()
+        check(saved == full_expected, "answer_file: copia completa e identica al testo di agy",
+              (len(saved), len(full_expected)))
+        if not WINDOWS:
+            check(stat.S_IMODE(os.stat(answer_file).st_mode) == 0o600, "answer_file: permessi 0600 (POSIX)")
+    else:
+        check(False, "answer_file: copia completa e identica al testo di agy", "answer_file mancante o assente su disco")
+
+    # read-only che modifica il workspace: rilevato via git status prima/dopo, anche su un file già 'M'
+    is_err, rep = c.delegate("SCENARIO=readonlybad TARGET=NUOVO_FILE.txt", mode="read-only")
+    check(is_err is False and rep.get("unexpected_changes") == ["NUOVO_FILE.txt"]
+          and any("read-only" in s.lower() for s in rep.get("open_issues", []))
+          and "read-only" in rep.get("hint", "").lower(),
+          "read-only: nuovo file toccato da agy → unexpected_changes, open_issues, hint", rep)
+
+    dirty = os.path.join(REPO, "already_dirty.txt")
+    with open(dirty, "w", encoding="utf-8") as fh:
+        fh.write("iniziale\n")
+    subprocess.run(["git", "-C", REPO, "add", "already_dirty.txt"], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["git", "-C", REPO, "-c", "user.email=t@example.com", "-c", "user.name=t",
+                    "commit", "-q", "-m", "seed already_dirty.txt"], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(dirty, "a", encoding="utf-8") as fh:
+        fh.write("modifica preesistente, prima del task\n")
+    is_err, rep = c.delegate("SCENARIO=readonlybad TARGET=already_dirty.txt", mode="read-only")
+    check(is_err is False and rep.get("unexpected_changes") == ["already_dirty.txt"],
+          "read-only: file già modificato prima del task, ulteriormente toccato → comunque unexpected_changes", rep)
 
     cases = [
         ("SCENARIO=denied", lambda e, r: e and r.get("status") == "blocked"
@@ -622,6 +703,52 @@ def test_units():
     env = ab.parse_json_object('log\n{"status":"SUCCESS","response":"a\nb\n{}\n","conversation_id":"x"}\ncoda')
     check(env and env["conversation_id"] == "x", "envelope letto malgrado a capo grezzi, rumore e graffe interne")
     check(ab.parse_json_object("niente json") is None, "nessun JSON → None")
+
+    # preamboli: {cwd} presente e sostituibile in entrambi, regole read-only solo in quello read-only
+    check("{cwd}" in ab.PREAMBLES["edit"] and "{cwd}" in ab.PREAMBLES["read-only"],
+          "PREAMBLES: segnaposto {cwd} presente in entrambi i preamboli")
+    edit_built = ab.PREAMBLES["edit"].format(cwd="/w")
+    ro_built = ab.PREAMBLES["read-only"].format(cwd="/w")
+    check("/w" in edit_built and "/w" in ro_built, "PREAMBLES: .format(cwd=...) non solleva eccezioni")
+    check("Do not commit, push" in edit_built and "files_changed" in edit_built and "READ-ONLY" not in edit_built,
+          "preambolo edit: regole di commit/verifica presenti, nessuna regola read-only")
+    check("READ-ONLY" in ro_built and "do not create, modify, move or delete" in ro_built
+          and "answer" in ro_built and "Do not commit, push" not in ro_built,
+          "preambolo read-only: vieta le modifiche, chiede il risultato in answer")
+
+    # _clip_answer: nota di troncamento con e senza answer_file
+    check(ab._clip_answer("corto", 100, "/x/log.answer.md") == "corto", "_clip_answer: sotto il limite, invariato")
+    clipped = ab._clip_answer("y" * 500, 200, "/x/log.answer.md")
+    check(len(clipped) <= 200 and "/x/log.answer.md" in clipped, "_clip_answer: oltre il limite, nota con answer_file")
+    clipped_nofile = ab._clip_answer("y" * 500, 200, None)
+    check(len(clipped_nofile) <= 200 and "truncated" in clipped_nofile and "full answer in" not in clipped_nofile,
+          "_clip_answer: oltre il limite senza answer_file, nota generica")
+    clipped_tiny = ab._clip_answer("y" * 500, 10, "/x/log.answer.md")  # limite più corto della nota stessa
+    check(len(clipped_tiny) <= 10, "_clip_answer: limite più piccolo della nota stessa, comunque limitato", clipped_tiny)
+
+    # rilevazione delle modifiche indesiderate: parsing e diff dello snapshot git
+    check(ab._parse_git_status_z(" M sub/a.txt\x00?? sub/b.txt\x00") == ["sub/a.txt", "sub/b.txt"],
+          "_parse_git_status_z: voci semplici")
+    check(ab._parse_git_status_z("R  new.txt\x00old.txt\x00") == ["new.txt"],
+          "_parse_git_status_z: rinomina, salta il vecchio percorso")
+    before_snap = {"a.txt": (1.0, 10), "b.txt": (2.0, 20)}
+    after_same = {"a.txt": (1.0, 10), "b.txt": (2.0, 20)}
+    after_changed = {"a.txt": (1.0, 10), "b.txt": (2.0, 21), "c.txt": (3.0, 5)}
+    check(ab.diff_git_snapshots(before_snap, after_same) == [], "diff_git_snapshots: nessuna differenza → []")
+    check(ab.diff_git_snapshots(before_snap, after_changed) == ["b.txt", "c.txt"],
+          "diff_git_snapshots: file toccato (già presente) e file nuovo, entrambi rilevati")
+
+    # read-only fuori da un repository git: nessuna rilevazione, nessun crash, nota chiara nel log
+    b_any = ab.Bridge(dict(ab.load_config(), allowed_roots=["*"]))
+    res_nogit = b_any.delegate({"task": "SCENARIO=answer", "cwd": WORK, "mode": "read-only"}, ab.CancelToken())
+    check(res_nogit.get("status") == "done" and "unexpected_changes" not in res_nogit,
+          "read-only fuori da un repository git: nessun falso positivo, nessun crash", res_nogit)
+    if res_nogit.get("log_file") and os.path.exists(res_nogit["log_file"]):
+        with open(res_nogit["log_file"], encoding="utf-8") as fh:
+            logged = json.load(fh)
+        check(logged.get("unexpected_changes_check") == "not available: cwd is not inside a git repository",
+              "read-only fuori da un repository git: il log dice che la rilevazione non era disponibile",
+              logged.get("unexpected_changes_check"))
 
     cfg = ab.load_config()
     launcher = ab.resolve_executable(cfg["command"][0])
@@ -836,6 +963,30 @@ def test_units():
     check(all(os.path.exists(os.path.join(rot, f)) for f in foreign), "rotazione: file estranei intatti",
           os.listdir(rot))
     check([os.path.join(rot, f) for f in ours] == paths[-3:], "rotazione: restano gli ultimi keep_logs scritti", ours)
+
+    # rotazione: rimuove anche i .answer.md compagni dei log rimossi, mai quelli dei log rimasti o estranei
+    rot2 = os.path.join(WORK, "rot2")
+    os.makedirs(rot2)
+    foreign_answer = os.path.join(rot2, "20200101-000000-abcdef01.answer.md")  # nessun .json compagno: mai nostro
+    with open(foreign_answer, "w") as fh:
+        fh.write("estraneo")
+    logger2 = ab.Bridge(dict(cfg, log_dir=rot2, keep_logs=2))
+    made = []
+    for n in range(4):
+        p = logger2._write_log({"id": uuid.uuid4().hex, "n": n})
+        companion = p[: -len(".json")] + ".answer.md"
+        with open(companion, "w", encoding="utf-8") as fh:
+            fh.write("answer #%d" % n)
+        made.append((p, companion))
+    remaining_logs = sorted(f for f in os.listdir(rot2) if ab.LOG_NAME_RE.match(f))
+    check(len(remaining_logs) == 2, "rotazione .answer.md: restano solo gli ultimi keep_logs log", remaining_logs)
+    check(all(os.path.exists(p) and os.path.exists(c) for p, c in made[-2:]),
+          "rotazione .answer.md: log e compagno degli ultimi keep_logs sopravvivono", made[-2:])
+    check(all(not os.path.exists(p) and not os.path.exists(c) for p, c in made[:-2]),
+          "rotazione .answer.md: log e compagno dei log più vecchi rimossi insieme", made[:-2])
+    check(os.path.exists(foreign_answer), "rotazione .answer.md: un .answer.md estraneo non viene toccato",
+          os.listdir(rot2))
+
     if not WINDOWS:
         fresh = os.path.join(WORK, "nuovi-log")
         path = ab.Bridge(dict(cfg, log_dir=fresh))._write_log({"id": uuid.uuid4().hex})
