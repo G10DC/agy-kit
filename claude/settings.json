@@ -1,9 +1,11 @@
 {
   "availableModels": ["opus", "haiku"],
+  "enableWorkflows": true,
   "permissions": {
     "allow": ["mcp__antigravity__delegate"]
   },
   "env": {
-    "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS": "14400000"
+    "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS": "14400000",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "inherit"
   }
 }

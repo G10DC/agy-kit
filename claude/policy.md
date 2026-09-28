@@ -9,8 +9,8 @@ This session pairs Claude Code ultracode with the user's Antigravity UltraCode m
 ## In workflow scripts
 
 ```js
-// Implementation leaf: always the relay, never a model override.
-const r = await agent(taskText, { agentType: 'antigravity', label: 'impl:parser', phase: 'Implement', schema: AG_REPORT })
+// Implementation leaf: always the relay, never a model override. effort 'low': the relay only copies text.
+const r = await agent(taskText, { agentType: 'antigravity', effort: 'low', label: 'impl:parser', phase: 'Implement', schema: AG_REPORT })
 
 // Reasoning stage: default agent type and no model override, so it runs on Opus.
 const check = await agent(verifyPrompt, { label: 'verify:parser', phase: 'Verify' })
@@ -34,15 +34,17 @@ Antigravity cannot see this conversation, your plan or the other tasks. Each tas
 
 ## Reading the report
 
-The relay returns the bridge's JSON report. Act on `status`:
+The relay returns the bridge's JSON report and never retries on its own: every resend is your decision. Each task gets at most one new send after the first attempt. Act on `status`:
 
 - `done`: verify, then move on.
-- `partial`, `failed`, `unverified`: read `summary` and `open_issues`; clarify, split or add context, then resend (at most twice per task). To continue the same Antigravity conversation for a follow-up fix, add a line `conversation_id: <id>` (taken from the report) to the new task text.
+- `partial`, `failed`, `unverified`: read `summary` and `open_issues`; clarify, split or add context, then resend. To continue the same Antigravity conversation for a follow-up fix, add a line `conversation_id: <id>` (taken from the report) to the new task text.
 - `blocked`: Antigravity's own permissions refused actions (`denied_actions`). Retrying will not help. Tell the user what was denied and point them to the 'Permessi' section of agy-kit's docs/GUIDA_CLAUDE.md (usually: `AGY_KIT_SKIP_PERMISSIONS=1` in `~/.config/agy-kit/config`).
-- `timeout`, `busy`: split the task, or send fewer tasks at once.
-- `error`, `empty`: retry once if `retryable` is true; otherwise report the error to the user.
+- `timeout`: the task was interrupted and may have left changes half done. Check the real diff (`git diff`, `git status`) first; then either continue the same conversation with `conversation_id: <id>` or split what is left into smaller tasks.
+- `cancelled`: the run was cancelled (by you or the user). Like `timeout`, it may have left partial changes: check the diff before deciding whether the task is still needed.
+- `busy`: all bridge slots were taken. Send fewer tasks at once, then resend.
+- `error`, `empty`: resend only if `retryable` is true (for `empty`, shorten the task as the `hint` says); otherwise report the error to the user.
 
-If Antigravity cannot get a task done after two attempts, stop and tell the user. Do not silently take the implementation over yourself or hand it to another model; do it yourself only if the user says so.
+If the task is still not done after that one resend, stop and tell the user. Do not silently take the implementation over yourself or hand it to another model; do it yourself only if the user says so.
 
 ## Outside workflows
 
@@ -57,11 +59,14 @@ const AG_REPORT = {
     status: { type: 'string' }, // done | partial | failed | unverified | blocked | timeout | error | empty | busy | cancelled
     summary: { type: 'string' },
     files_changed: { type: 'array', items: { type: 'string' } },
+    commands_run: { type: 'array', items: { type: 'string' } },
     tests: { type: 'string' },
     open_issues: { type: 'array', items: { type: 'string' } },
     denied_actions: { type: 'array', items: { type: 'string' } },
     conversation_id: { type: 'string' },
     retryable: { type: 'boolean' },
+    hint: { type: 'string' },
+    log_file: { type: 'string' },
   },
   required: ['status', 'summary'],
 }

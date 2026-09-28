@@ -3,7 +3,8 @@
 # ultra-ag: Claude Code in modalità ultracode che delega l'implementazione ad Antigravity.
 #   - Opus ($AGY_KIT_CLAUDE_MODEL, default opus) ragiona, scompone, verifica
 #   - ogni task atomico va a UltraCode di agy-kit (agy-ultracode: Gemini Pro + sotto-agenti Flash)
-#     tramite il relay `antigravity` (Haiku, un solo tool) e il bridge MCP claude/ag_bridge.py
+#     tramite il relay `antigravity` (Haiku: il tool delegate più ToolSearch per caricarlo)
+#     e il bridge MCP claude/ag_bridge.py
 #   - Sonnet escluso (availableModels in claude/settings.json)
 # Uso:
 #   ultra-ag                        sessione interattiva
@@ -24,7 +25,7 @@ KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
 
 case "${1:-}" in
   -h|--help)
-    sed -n '3,12p' "$src" | sed 's/^# \{0,1\}//'
+    sed -n '3,13p' "$src" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 
@@ -41,27 +42,45 @@ if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
   echo "ultra-ag: Claude Code non trovato ($CLAUDE_BIN). Installalo o imposta AGY_KIT_CLAUDE_BIN in $AGY_KIT_CONFIG" >&2
   exit 127
 fi
-# percorso reale dell'interprete (non uno shim di pyenv/asdf, che dipende dalla cartella)
-PY="$(python3 -c 'import sys; print(sys.executable if sys.version_info >= (3, 8) else "")' 2>/dev/null || true)"
-if [ -z "$PY" ]; then
-  echo "ultra-ag: serve python3 3.8 o successivo per il bridge verso Antigravity" >&2
-  exit 127
-fi
+# percorso reale dell'interprete (non uno shim di pyenv/asdf né l'alias del Microsoft Store)
+agy_kit_require_python ultra-ag
 agy_kit_require_bin
 
-# Configurazione MCP generata a ogni avvio (percorsi assoluti, escaping JSON corretto).
-MCP_JSON="$("$PY" -c '
+# Su Windows il bridge (Python nativo) lancia agy-ultracode tramite la bash di Git for Windows.
+BRIDGE_BASH=""
+if agy_kit_is_windows; then
+  if [ -n "${AGY_KIT_BASH:-}" ]; then
+    BRIDGE_BASH="$(agy_kit_native_path "$AGY_KIT_BASH")"
+  else
+    BRIDGE_BASH="$(agy_kit_git_bash || true)"
+  fi
+  if [ -z "$BRIDGE_BASH" ]; then
+    echo "ultra-ag: bash.exe di Git for Windows non trovato: il bridge non potrebbe lanciare agy-ultracode." >&2
+    echo "          Imposta AGY_KIT_BASH al percorso di Git\\bin\\bash.exe" >&2
+    exit 127
+  fi
+fi
+
+# Configurazione MCP generata a ogni avvio (percorsi assoluti in forma nativa, escaping JSON
+# corretto). -I: modalità isolata, così un json.py nella cartella corrente non viene importato.
+MCP_JSON="$("$AGY_KIT_PY" -I -c '
 import json, sys
-print(json.dumps({"mcpServers": {"antigravity": {
-    "type": "stdio", "command": sys.argv[1], "args": [sys.argv[2]],
-    "timeout": 14400000, "alwaysLoad": True}}}))
-' "$PY" "$CL/ag_bridge.py")"
+server = {"type": "stdio", "command": sys.argv[1], "args": [sys.argv[2]],
+          "timeout": 14400000, "alwaysLoad": True}
+if sys.argv[3]:
+    server["env"] = {"AGY_KIT_BASH": sys.argv[3]}
+sys.stdout.write(json.dumps({"mcpServers": {"antigravity": server}}))
+' "$(agy_kit_native_path "$AGY_KIT_PY")" "$(agy_kit_native_path "$CL/ag_bridge.py")" "$BRIDGE_BASH")"
+
+# Gli stadi di workflow senza modello esplicito ereditano Opus anche se l'utente ha
+# impostato CLAUDE_CODE_SUBAGENT_MODEL (per esempio haiku) altrove.
+export CLAUDE_CODE_SUBAGENT_MODEL=inherit
 
 exec "$CLAUDE_BIN" \
   --model "$AGY_KIT_CLAUDE_MODEL" \
   --effort ultracode \
-  --settings "$CL/settings.json" \
+  --settings "$(agy_kit_native_path "$CL/settings.json")" \
   --mcp-config "$MCP_JSON" \
   --agents "$(cat "$CL/agents.json")" \
-  --append-system-prompt-file "$CL/policy.md" \
+  --append-system-prompt-file "$(agy_kit_native_path "$CL/policy.md")" \
   "$@"

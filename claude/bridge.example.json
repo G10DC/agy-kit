@@ -9,13 +9,13 @@
     "{conversation_args}",
     "-p", "{prompt}"
   ],
-  "_help_limits": "max_parallel = task Antigravity contemporanei; gli altri aspettano in coda fino a queue_wait_minutes. task_timeout_minutes = durata massima di un task.",
+  "_help_limits": "max_parallel = task Antigravity contemporanei; gli altri aspettano in coda fino a queue_wait_minutes. task_timeout_minutes = durata massima di un task, fino a un tetto di 120 minuti (oltre viene tagliato; il tool delegate puo chiedere un timeout_minutes diverso per la singola chiamata, sempre fino a 120).",
   "max_parallel": 4,
   "task_timeout_minutes": 25,
   "queue_wait_minutes": 90,
-  "_help_roots": "Cartelle in cui Antigravity puo lavorare. Vuoto = il progetto di Claude Code e la sua radice git. [\"*\"] = ovunque.",
+  "_help_roots": "Cartelle da cui un task puo PARTIRE, non un sandbox: con i permessi saltati (AGY_KIT_SKIP_PERMISSIONS=1, il default) Antigravity puo comunque leggere/scrivere ovunque una volta avviato. Vuoto = il progetto di Claude Code e la sua radice git. [\"*\"] = ovunque.",
   "allowed_roots": [],
-  "_help_logs": "null = ~/.local/state/agy-kit/bridge-logs (un file JSON per task).",
+  "_help_logs": "null = ~/.local/state/agy-kit/bridge-logs (un file JSON per task, con prompt e output completi: puo contenere segreti). Deve essere un percorso assoluto (anche con ~). Su macOS/Linux i file sono creati 0600 in una cartella 0700.",
   "log_dir": null,
   "keep_logs": 200,
   "extra_env": {}

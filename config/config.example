@@ -8,15 +8,23 @@ AGY_KIT_MODEL=gemini-3.1-pro
 # Sforzo di ragionamento: low | medium | high  (vuoto = non passare --effort)
 AGY_KIT_EFFORT=high
 
-# 1 = UltraCode/Compendio non chiedono permessi per i comandi (comportamento storico)
-# 0 = agy chiede conferma come di consueto
+# 1 = UltraCode/Compendio non chiedono permessi per i comandi (comportamento storico, default)
+# 0 o vuoto = agy chiede conferma come di consueto (conta solo il valore esatto 1)
 AGY_KIT_SKIP_PERMISSIONS=1
+
+# 1 = UltraCode/Compendio girano con `agy --sandbox` (restrizioni sul terminale).
+# Consigliato quando Compendio legge documenti di terzi. Default 0.
+AGY_KIT_SANDBOX=0
 
 # 1 = anche le sessioni `agy` normali saltano i permessi (sconsigliato)
 AGY_KIT_PLAIN_SKIP_PERMISSIONS=0
 
 # Percorso del binario agy, se non è nel PATH
 #AGY_BIN="$HOME/.local/bin/agy"
+
+# Python 3.8+ per compendio-verify e per il bridge di ultra-ag. Vuoto = ricerca automatica
+# (python3, python, py -3; scarta gli interpreti che non si avviano, come l'alias del Microsoft Store)
+#AGY_KIT_PYTHON="$HOME/.pyenv/versions/3.12.4/bin/python3"
 
 # --- ultra-ag: Claude Code che delega l'implementazione a UltraCode (docs/GUIDA_CLAUDE.md) ---
 # Modello di Claude Code che ragiona e orchestra (ultracode). Sonnet è escluso in ogni caso.

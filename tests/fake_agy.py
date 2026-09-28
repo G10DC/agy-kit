@@ -2,16 +2,19 @@
 """agy finto per i test del bridge (tests/test_bridge.py): nessuna rete.
 
 Il comportamento dipende da SCENARIO=<nome> nel prompt; SLEEP=<secondi> ne regola la durata.
-Registra argv, cartella e PID in $FAKE_AGY_LOG.
+Registra argv, cartella e PID in $FAKE_AGY_LOG. I processi che restano in attesa ('hang',
+'daemon') escono da soli quando compare il file $FAKE_AGY_LOG/stop, oppure dopo 120 s.
 """
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
-LOG_DIR = os.environ.get("FAKE_AGY_LOG", "/tmp/fake-agy")
+LOG_DIR = os.environ.get("FAKE_AGY_LOG") or os.path.join(tempfile.gettempdir(), "fake-agy")
+STOP = os.path.join(LOG_DIR, "stop")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 args = sys.argv[1:]
@@ -35,7 +38,7 @@ while i < len(args):
     i += 1
 
 run_id = "%d-%d" % (os.getpid(), int(time.time() * 1000))
-with open(os.path.join(LOG_DIR, "argv-%s.json" % run_id), "w") as fh:
+with open(os.path.join(LOG_DIR, "argv-%s.json" % run_id), "w", encoding="utf-8") as fh:
     json.dump({"argv": args, "cwd": os.getcwd(), "conversation": conversation}, fh)
 with open(os.path.join(LOG_DIR, "pids.txt"), "a") as fh:
     fh.write("%d\n" % os.getpid())
@@ -56,8 +59,18 @@ def finish(code=0):
     sys.exit(code)
 
 
-if scenario == "hang":
-    time.sleep(1000)
+WAIT_FOR_STOP = "import os,time\nend=time.time()+%d\nwhile time.time()<end and not os.path.exists(%r): time.sleep(0.2)"
+
+if scenario in ("hang", "stubborn"):
+    if scenario == "stubborn":
+        # figlio nello stesso gruppo che ignora SIGTERM: deve morire comunque (SIGKILL al gruppo / Job Object)
+        code = "import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n" + WAIT_FOR_STOP % (120, STOP)
+        child = subprocess.Popen([sys.executable, "-c", code])
+        with open(os.path.join(LOG_DIR, "stubborn.txt"), "a") as fh:
+            fh.write("%d\n" % child.pid)
+    end = time.time() + 120
+    while time.time() < end and not os.path.exists(STOP):
+        time.sleep(0.2)
     finish(0)
 
 time.sleep(sleep_s)
@@ -83,11 +96,17 @@ elif scenario == "denied":
     print(json.dumps(envelope))
     finish(0)
 elif scenario == "agyerror":
-    sys.stderr.write('log\nAGY_ERROR: {"status":"UNAVAILABLE","code":503,"retryable":true,"message":"model overloaded"}\n')
+    # formato di agy 1.2: AGY_ERROR: {"short_error": ..., "retryable": ..., "error_id": ...}
+    sys.stderr.write('log\nAGY_ERROR: {"short_error":"model overloaded","retryable":true,"error_id":"e-503"}\n')
+    finish(3)
+elif scenario == "exit3":
+    sys.stderr.write("agent crashed without details\n")
     finish(3)
 elif scenario == "empty":
     envelope["response"] = ""
     print(json.dumps(envelope))
+    finish(0)
+elif scenario == "noout":
     finish(0)
 elif scenario == "text":
     print("Ho modificato src/a.py e lanciato i test: 3 passed.")
@@ -100,9 +119,24 @@ elif scenario == "timeoutstatus":
     envelope["response"] = "lavoro parziale"
     print(json.dumps(envelope))
     finish(0)
+elif scenario in ("printtimeout", "printtimeoutempty"):
+    # agy >= 1.1.28 allo scadere di --print-timeout: output parziale, uscita 0, avviso su stderr
+    with open("HALF_DONE.txt", "w") as fh:
+        fh.write("modifica a metà\n")
+    envelope["response"] = "" if scenario == "printtimeoutempty" else "Sto modificando src/a.py, poi lancio i test"
+    print(json.dumps(envelope))
+    sys.stderr.write("[agy] print timeout after 5m0s with turn in progress; returning partial output\n")
+    finish(0)
+elif scenario == "emptysummary":
+    envelope["structured_output"] = {"status": "done", "summary": "", "files_changed": []}
+    envelope["response"] = ""
+    print(json.dumps(envelope))
+    finish(0)
 elif scenario == "daemon":
     # server in background che eredita stdout/stderr e sopravvive ad agy
-    subprocess.Popen(["sleep", "30"], start_new_session=True)
+    d = subprocess.Popen([sys.executable, "-c", WAIT_FOR_STOP % (30, STOP)], start_new_session=True)
+    with open(os.path.join(LOG_DIR, "daemons.txt"), "a") as fh:
+        fh.write("%d\n" % d.pid)
     envelope["structured_output"] = {"status": "done", "summary": "avviato un dev server", "files_changed": []}
     envelope["response"] = "ok"
     print(json.dumps(envelope))

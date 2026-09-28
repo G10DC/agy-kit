@@ -16,6 +16,10 @@ Configuration: ~/.config/agy-kit/bridge.json (optional), or the file named by
 the AG_BRIDGE_CONFIG environment variable. Model, effort and permissions of the
 Antigravity side come from agy-kit's own config (~/.config/agy-kit/config).
 See docs/GUIDA_CLAUDE.md.
+
+On Windows the kit's launchers are bash scripts: the bridge runs them through
+Git Bash (AGY_KIT_BASH, or the bash.exe of Git for Windows) and keeps every
+agy process tree in a Job Object, so timeouts and cancellations kill it all.
 """
 from __future__ import annotations
 
@@ -31,21 +35,33 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 SERVER_NAME = "antigravity-bridge"
 TOOL_NAME = "delegate"
 
-SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
-DEFAULT_PROTOCOL = "2025-06-18"
+SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")  # oldest to newest
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 KIT_DIR = os.path.dirname(SCRIPT_DIR)  # agy-kit root: this file lives in <kit>/claude/
+WINDOWS = os.name == "nt"
+
+_MSYS_DRIVE_RE = re.compile(r"^/(?:cygdrive/)?([A-Za-z])(?=/|$)")
+
+
+def native_path(path):
+    """On Windows turn a Git Bash path ('/c/Users/x') into 'C:\\Users\\x'; elsewhere return it unchanged."""
+    if not WINDOWS or not path:
+        return path
+    m = _MSYS_DRIVE_RE.match(path)
+    if not m:
+        return path
+    return os.path.normpath(m.group(1).upper() + ":" + (path[m.end():] or "\\"))
 
 
 def _xdg(var: str, fallback: str) -> str:
-    return os.environ.get(var) or os.path.join(os.path.expanduser("~"), fallback)
+    return native_path(os.environ.get(var)) or os.path.join(os.path.expanduser("~"), fallback)
 
 # Statuses that describe a task outcome (the bridge worked) versus an
 # infrastructure problem (the bridge or agy did not get the task done).
@@ -132,7 +148,21 @@ DEFAULT_CONFIG = {
 
 MAX_TIMEOUT_MINUTES = 120
 HEARTBEAT_S = float(os.environ.get("AG_BRIDGE_HEARTBEAT_S") or 15)  # progress notifications
-CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+# Never starts with '-': the id becomes an argument of agy and must not look like a flag.
+CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+# agy >= 1.1.28: when --print-timeout expires mid-turn it prints the partial output, exits 0 and
+# warns on stderr "[agy] print timeout after 25m0s with turn in progress; returning partial output".
+AGY_TIMEOUT_RE = re.compile(r"print timeout after \S+.*partial output")
+# Log file names: <date>-<time>-<microseconds>-<run id>.json (1.1.x wrote no microseconds).
+LOG_NAME_RE = re.compile(r"^(\d{8}-\d{6})(?:-(\d{6}))?-[0-9a-f]{8}\.json$")
+# The prompt travels on the command line. Linux caps every argument at 128 KiB (MAX_ARG_STRLEN)
+# and agy-ultracode prefixes /ultracode to it; Windows caps the whole command line at 32767
+# characters, and bash rebuilds it on the way to agy.exe with agy's own path and flags.
+LINUX_ARG_MAX_BYTES = 128 * 1024 - 1024
+WINDOWS_CMDLINE_MAX = 32767 - 2048
+# MSYS's globify truncates each argument a NATIVE parent hands to bash.exe at 8186 characters
+# (BL-1); comfortably below that, leaving room for the quoting win_command_line adds.
+WINDOWS_BASH_ARG_MAX = 8000
 
 
 def log_stderr(msg: str) -> None:
@@ -153,7 +183,7 @@ class ConfigError(Exception):
 
 
 def config_path() -> str:
-    return os.path.expanduser(os.environ.get("AG_BRIDGE_CONFIG")
+    return os.path.expanduser(native_path(os.environ.get("AG_BRIDGE_CONFIG"))
                               or os.path.join(_xdg("XDG_CONFIG_HOME", ".config"), "agy-kit", "bridge.json"))
 
 
@@ -206,8 +236,12 @@ def load_config() -> dict:
     if not isinstance(cfg["extra_env"], dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in cfg["extra_env"].items()):
         raise ConfigError("'extra_env' must be an object of string values")
-    if cfg["log_dir"] is not None and not isinstance(cfg["log_dir"], str):
-        raise ConfigError("'log_dir' must be a path or null")
+    if cfg["log_dir"] is not None:
+        if not isinstance(cfg["log_dir"], str):
+            raise ConfigError("'log_dir' must be a path or null")
+        # A relative path would land in whatever directory the bridge runs in (the project).
+        if not os.path.isabs(native_path(os.path.expanduser(cfg["log_dir"]))):
+            raise ConfigError("'log_dir' must be an absolute path (or start with ~)")
     return cfg
 
 
@@ -227,9 +261,9 @@ def compute_allowed_roots(cfg: dict):
     configured = cfg["allowed_roots"]
     if "*" in configured:
         return None
-    candidates = [os.path.expanduser(r) for r in configured]
+    candidates = [os.path.expanduser(native_path(r)) for r in configured]
     if not candidates:
-        for base in (os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd()):
+        for base in (native_path(os.environ.get("CLAUDE_PROJECT_DIR")), os.getcwd()):
             if base:
                 candidates.append(base)
                 top = git_toplevel(base)
@@ -243,17 +277,67 @@ def compute_allowed_roots(cfg: dict):
     return roots
 
 
+_LAUNCHER_MARKER = b"AgyKitLauncher"  # ASCII marker string compiled into lib/win-launcher.cs
+
+
+def _is_agy_kit_launcher(path: str) -> bool:
+    """True if path is agy-kit's own native Windows launcher (lib/win-launcher.cs).
+
+    That launcher just re-execs its extensionless sibling through Git Bash, so once we can see
+    that sibling directly we can skip the extra hop (and let the prompt travel on stdin, BL-1).
+    """
+    try:
+        with open(path, "rb") as fh:
+            return _LAUNCHER_MARKER in fh.read(1 << 20)  # a small executable; 1 MiB is plenty
+    except OSError:
+        return False
+
+
+def _prefer_extensionless_sibling(path: str) -> str:
+    """Never hand a .bat/.cmd straight to CreateProcess, and skip agy-kit's own native launcher
+    .exe when we can go straight to what it would run (BL-3).
+
+    CreateProcess starts a .bat/.cmd through cmd.exe /c, which stops at the first newline and
+    reinterprets &, | and > in the rest of the argument list (the BatBadBut class of bug): a
+    multi-line task with those characters would reach agy truncated and mangled. If the same
+    name without an extension exists next to it (the kit's bash wrapper), use that instead, run
+    through Git Bash like any other kit script; otherwise refuse with a clear error rather than
+    run the shell shim. A native launcher .exe (BIN_DIR/<name>.exe, lib/win-launcher.cs) is safe
+    to run directly, but if its wrapper is right there we prefer it: one less process, and the
+    prompt can go on stdin instead of the command line.
+    """
+    if not WINDOWS:
+        return path
+    ext = os.path.splitext(path)[1].lower()
+    is_shell_shim = ext in (".bat", ".cmd")
+    is_native_launcher = ext == ".exe" and _is_agy_kit_launcher(path)
+    if not (is_shell_shim or is_native_launcher):
+        return path
+    sibling = os.path.splitext(path)[0]
+    if os.path.isfile(sibling):
+        return sibling
+    if is_shell_shim:
+        raise FileNotFoundError(
+            "{} is a .{} launcher (unsafe to run with an untrusted prompt: cmd.exe would parse it) "
+            "and its bash wrapper {} is missing; reinstall agy-kit (./install.sh), or point 'command' "
+            "at a .exe or a bash script instead".format(path, ext.lstrip("."), sibling))
+    return path  # a standalone .exe that happens to contain the marker string: leave it alone
+
+
 def resolve_executable(exe: str) -> str:
     """Absolute path of the command's first element; FileNotFoundError if it cannot run."""
-    exe = os.path.expanduser(exe.replace("{kit_dir}", KIT_DIR))
+    exe = native_path(os.path.expanduser(exe.replace("{kit_dir}", KIT_DIR)))
     if os.path.isabs(exe):
+        exe = os.path.normpath(exe)
+        if WINDOWS and not os.path.isfile(exe) and os.path.isfile(exe + ".exe"):
+            exe += ".exe"  # Git Bash shows /c/.../agy for agy.exe
         if not os.path.isfile(exe):
             raise FileNotFoundError(exe)
-        return exe
+        return _prefer_extensionless_sibling(exe)
     found = shutil.which(exe)
     if not found:
         raise FileNotFoundError(exe)
-    return found
+    return _prefer_extensionless_sibling(found)
 
 
 def is_within(path: str, root: str) -> bool:
@@ -264,31 +348,299 @@ def is_within(path: str, root: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Windows: scripts need an interpreter
+# --------------------------------------------------------------------------- #
+
+WINDOWS_EXECUTABLES = (".exe", ".com", ".bat", ".cmd")
+
+
+def _under_system_dir(path: str) -> bool:
+    system = os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "")
+    return os.path.normcase(os.path.abspath(path)).startswith(os.path.normcase(system))
+
+
+def find_git_bash():
+    """bash.exe of Git for Windows, or None.
+
+    AGY_KIT_BASH first (ultra-ag sets it), then the Git installation that owns git.exe. The
+    bin\\bash.exe launcher is preferred because it puts Git's usr\\bin and mingw64\\bin on PATH.
+    Never C:\\Windows\\System32\\bash.exe: that one is WSL.
+    """
+    configured = native_path(os.environ.get("AGY_KIT_BASH"))
+    if configured and os.path.isfile(configured) and not _under_system_dir(configured):
+        return configured
+    roots = []
+    git = shutil.which("git")
+    if git:
+        d = os.path.dirname(os.path.realpath(git))  # <Git>\cmd, <Git>\bin or <Git>\mingw64\bin
+        for _ in range(3):
+            roots.append(d)
+            d = os.path.dirname(d)
+    for var in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        if os.environ.get(var):
+            roots.append(os.path.join(os.environ[var], "Git"))
+    if os.environ.get("LOCALAPPDATA"):
+        roots.append(os.path.join(os.environ["LOCALAPPDATA"], "Programs", "Git"))
+    for rel in (("bin", "bash.exe"), ("usr", "bin", "bash.exe")):
+        for root in roots:
+            candidate = os.path.join(root, *rel)
+            if os.path.isfile(candidate) and not _under_system_dir(candidate):
+                return candidate
+    return None
+
+
+def _is_python_script(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            first = fh.readline(256)
+    except OSError:
+        return False
+    return first.startswith(b"#!") and b"python" in first
+
+
+def _windows_launch_via_bash(exe: str) -> bool:
+    """True if platform_command would hand exe to Git Bash rather than run it (or Python) directly.
+
+    Used before platform_command itself, while argv still has the prompt as its own element, to
+    decide whether the BL-1 stdin routing applies (only for a launcher that will actually go
+    through bash.exe). Must agree with platform_command's own check below.
+    """
+    return WINDOWS and os.path.splitext(exe)[1].lower() not in WINDOWS_EXECUTABLES and not _is_python_script(exe)
+
+
+def platform_command(argv, env):
+    """argv and environment ready for subprocess on this system.
+
+    Windows' CreateProcess only starts real executables, so a script goes through its
+    interpreter: a Python script through this Python, anything else (the kit's launchers)
+    through Git Bash. Elsewhere, and for .exe files, nothing changes.
+    """
+    argv = list(argv)
+    if not WINDOWS or os.path.splitext(argv[0])[1].lower() in WINDOWS_EXECUTABLES:
+        return argv, env
+    if _is_python_script(argv[0]):
+        return [sys.executable] + argv, env
+    bash = find_git_bash()
+    if not bash:
+        raise FileNotFoundError("{} is a bash script and Git Bash was not found; install Git for Windows "
+                                "or set AGY_KIT_BASH to its bash.exe".format(argv[0]))
+    env = dict(os.environ if env is None else env)
+    bin_dir = os.path.dirname(bash)
+    if os.path.basename(os.path.dirname(bin_dir)).lower() == "usr":
+        # usr\bin\bash.exe, unlike the bin\bash.exe launcher, leaves PATH alone: without this, sed,
+        # dirname and readlink are missing when our parent has a bare Windows PATH.
+        root = os.path.dirname(os.path.dirname(bin_dir))
+        path = env.get("PATH", "")
+        known = [os.path.normcase(os.path.normpath(p)) for p in path.split(os.pathsep) if p]
+        extra = [d for d in (os.path.join(root, "mingw64", "bin"), bin_dir)
+                 if os.path.isdir(d) and os.path.normcase(d) not in known]
+        env["PATH"] = os.pathsep.join(extra + ([path] if path else []))
+    # Forward slashes: bash's dirname does not split C:\...\ paths.
+    return [bash, argv[0].replace("\\", "/")] + argv[1:], env
+
+
+def win_command_line(argv):
+    """What to hand to subprocess on Windows: argv, or for Git Bash a ready command line.
+
+    bash.exe (MSYS) splits its command line with Cygwin's rules, where inside quotes a
+    backslash escapes the next backslash or quote; list2cmdline follows the MSVCRT rules,
+    so 'a\\\\b' in a task would reach the script as 'a\\b'.
+    """
+    if os.path.basename(argv[0]).lower() != "bash.exe":
+        return argv
+    quoted = ('"' + a.replace("\\", "\\\\").replace('"', '\\"') + '"' for a in argv[1:])
+    return '"{}" {}'.format(argv[0], " ".join(quoted))
+
+
+def command_line_problem(argv, prompt_stdin=None):
+    """Why the system would refuse to start argv (None if it fits).
+
+    argv is the command as it will actually be spawned (bash.exe first when the launcher is a
+    bash script, per win_command_line/platform_command). prompt_stdin, when given, is the prompt
+    text that travels on agy's stdin instead of argv (BL-1): checked separately, against the
+    command line bash itself builds to exec the native agy.exe, since a prompt argument does not
+    appear in argv (or in `line` below) at all in that case.
+    """
+    if WINDOWS:
+        line = win_command_line(argv)
+        via_bash = isinstance(line, str)
+        if via_bash:
+            # A native process (this Python) starting bash.exe: MSYS rebuilds bash's own argv
+            # with globbing, which silently truncates each argument over 8186 characters (BL-1).
+            # Caught here so a long --add-dir/--log-file/--json-schema value, or a prompt embedded
+            # in a compound argument such as '--prompt={prompt}' (not the lone '{prompt}' element
+            # BL-1 routes through stdin instead), fails loudly instead of arriving mutilated.
+            for a in argv[1:]:
+                if len(a) > WINDOWS_BASH_ARG_MAX:
+                    return ("an argument to Git Bash would be {} characters; a native process "
+                            "starting bash.exe truncates arguments over about 8186").format(len(a))
+        else:
+            line = subprocess.list2cmdline(line)
+        size = len(line.encode("utf-16-le", "surrogatepass")) // 2
+        if size > WINDOWS_CMDLINE_MAX:
+            return "the command line would be {} characters and Windows accepts about {}".format(
+                size, WINDOWS_CMDLINE_MAX)
+        if prompt_stdin is not None:
+            # bash's own exec into agy.exe (no native-parent truncation here), but still one
+            # Windows command line, capped at 32767 characters in UTF-16 code units.
+            psize = len(prompt_stdin.encode("utf-16-le", "surrogatepass")) // 2
+            if psize > WINDOWS_CMDLINE_MAX:
+                return ("the prompt would be {} characters on agy's command line and Windows "
+                        "accepts about {}").format(psize, WINDOWS_CMDLINE_MAX)
+    elif sys.platform.startswith("linux"):  # macOS has no per-argument limit, only a 1 MiB total
+        size = max(len(a.encode("utf-8", "surrogatepass")) for a in argv)
+        if size > LINUX_ARG_MAX_BYTES:
+            return "the prompt would be {} bytes and Linux accepts about {} per argument".format(
+                size, LINUX_ARG_MAX_BYTES)
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Process handling
 # --------------------------------------------------------------------------- #
 
+if WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    class _BasicLimits(ctypes.Structure):  # JOBOBJECT_BASIC_LIMIT_INFORMATION
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class _ExtendedLimits(ctypes.Structure):  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        _fields_ = [("BasicLimitInformation", _BasicLimits), ("IoInfo", ctypes.c_uint64 * 6),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _k32.CreateJobObjectW.restype = wintypes.HANDLE
+    _k32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+    _k32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    _k32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    _k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    _k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _ntdll = ctypes.WinDLL("ntdll")
+    _ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+    _ntdll.NtResumeProcess.restype = ctypes.c_long
+
+    _CREATE_SUSPENDED = 0x00000004
+    _CREATE_NO_WINDOW = 0x08000000
+    _KILL_ON_JOB_CLOSE = 0x00002000
+    # A job handle is never used after it is closed. Re-entrant: in --run a signal handler
+    # (Ctrl+C) may interrupt the main thread while it holds the lock.
+    _JOB_LOCK = threading.RLock()
+
+
+def _win_job_kill_on_close(job, on: bool) -> bool:
+    info = _ExtendedLimits()
+    info.BasicLimitInformation.LimitFlags = _KILL_ON_JOB_CLOSE if on else 0
+    return bool(_k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)))  # 9 = extended
+
+
+def _win_start_in_job(proc: subprocess.Popen, job) -> None:
+    """Put a process started suspended into the job, then let it run.
+
+    Children inherit the job, so the whole agy tree is in it: TerminateJobObject kills the
+    tree, and KILL_ON_JOB_CLOSE kills it even when the bridge itself is killed (Claude Code
+    stops MCP servers with taskkill /T /F, which cannot follow the process chain through
+    MSYS's exec). Without a job, taskkill /T is a best-effort fallback.
+    """
+    proc._agy_job = job if _k32.AssignProcessToJobObject(job, int(proc._handle)) else None
+    if proc._agy_job is None:
+        _k32.CloseHandle(job)
+    if _ntdll.NtResumeProcess(int(proc._handle)) < 0:
+        proc.kill()
+        _win_release_job(proc, keep_running=False)
+        raise OSError("could not resume the new process")
+
+
+def _win_release_job(proc: subprocess.Popen, keep_running: bool) -> None:
+    with _JOB_LOCK:
+        job = getattr(proc, "_agy_job", None)
+        proc._agy_job = None
+        if job:
+            if keep_running:
+                # agy may leave background servers on purpose; like on POSIX, they outlive the task.
+                _win_job_kill_on_close(job, False)
+            _k32.CloseHandle(job)
+
+
+def _win_kill_tree(proc: subprocess.Popen) -> None:
+    with _JOB_LOCK:
+        job = getattr(proc, "_agy_job", None)
+        if job and _k32.TerminateJobObject(job, 1):
+            return
+    # No job: best effort by parent-child relationship. It can miss agy: MSYS's exec re-creates
+    # processes, so the Windows parent chain from bash to agy.exe is broken.
+    try:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if proc.poll() is None:
+        proc.kill()
+
+
+def _spawn(argv, **kwargs) -> subprocess.Popen:
+    """Start agy in a process group (POSIX) or a Job Object (Windows) of its own."""
+    if not WINDOWS:
+        return subprocess.Popen(argv, start_new_session=True, **kwargs)
+    job = _k32.CreateJobObjectW(None, None)
+    if job and not _win_job_kill_on_close(job, True):
+        _k32.CloseHandle(job)
+        job = None
+    # A hidden console of its own: no window pops up, and Ctrl+C/Ctrl+Break aimed at the bridge
+    # do not reach agy (like start_new_session). Suspended until it is inside the job.
+    flags = _CREATE_NO_WINDOW | (_CREATE_SUSPENDED if job else 0)
+    try:
+        proc = subprocess.Popen(win_command_line(argv), creationflags=flags, **kwargs)
+    except Exception:  # OSError, or ValueError for a NUL character in the task
+        if job:
+            _k32.CloseHandle(job)
+        raise
+    if job:
+        _win_start_in_job(proc, job)
+    return proc
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # EPERM: someone is still in the group
+    return True
+
+
 def kill_process_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
-    """Terminate agy and everything it started (it runs in its own session)."""
+    """Terminate agy and everything it started (its own process group, or its job on Windows)."""
     if proc.poll() is not None:
         return
+    if WINDOWS:
+        _win_kill_tree(proc)
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+        return
+    pgid = proc.pid  # start_new_session: agy leads its own group
     try:
-        if hasattr(os, "killpg"):
-            os.killpg(proc.pid, signal.SIGTERM)
-        else:
-            proc.terminate()
-    except (ProcessLookupError, PermissionError, OSError):
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
         pass
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
+        if proc.poll() is not None and not _group_alive(pgid):
             return
         time.sleep(0.1)
+    # Also when agy itself already exited: whatever ignored SIGTERM in its group dies now.
     try:
-        if hasattr(os, "killpg"):
-            os.killpg(proc.pid, signal.SIGKILL)
-        else:
-            proc.kill()
-    except (ProcessLookupError, PermissionError, OSError):
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
         pass
 
 
@@ -297,7 +649,7 @@ class CancelToken:
 
     def __init__(self) -> None:
         self._event = threading.Event()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # re-entrant: --run cancels from a signal handler
         self._proc = None
         self.state = "queued"
 
@@ -334,39 +686,60 @@ class RunOutcome:
         self.spawn_error = None
 
 
-def run_process(argv, cwd, env, timeout_s: float, token: CancelToken) -> RunOutcome:
+def run_process(argv, cwd, env, timeout_s: float, token: CancelToken, prompt_stdin: str = None) -> RunOutcome:
     """Run agy with output captured in temp files, not pipes.
 
     agy can leave background servers running after the turn; with pipes they
     would inherit the write end and keep us waiting for an EOF that never comes.
+
+    prompt_stdin, when given, is written to a UTF-8 temp file used as agy's stdin instead of
+    DEVNULL: on Windows the prompt then travels on stdin rather than the command line (BL-1).
+    None (always on POSIX) keeps the old DEVNULL behaviour exactly.
     """
     out = RunOutcome()
     start = time.monotonic()
-    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
-        popen_kwargs = dict(cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out_f, stderr=err_f)
-        if os.name == "posix":
-            popen_kwargs["start_new_session"] = True
-        try:
-            proc = subprocess.Popen(argv, **popen_kwargs)
-        except OSError as exc:
-            out.spawn_error = str(exc)
-            out.duration = time.monotonic() - start
-            return out
-        token.attach(proc)
-        try:
-            proc.wait(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            out.timed_out = True
-            kill_process_tree(proc)
+    stdin_f = None
+    try:
+        if prompt_stdin is not None:
+            stdin_f = tempfile.TemporaryFile()
+            stdin_f.write(prompt_stdin.encode("utf-8"))
+            stdin_f.seek(0)
+        with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
             try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                pass
-        out.exit_code = proc.returncode
-        out_f.seek(0)
-        err_f.seek(0)
-        out.stdout = out_f.read().decode("utf-8", "replace")
-        out.stderr = err_f.read().decode("utf-8", "replace")
+                proc = _spawn(argv, cwd=cwd, env=env,
+                              stdin=(stdin_f if stdin_f is not None else subprocess.DEVNULL),
+                              stdout=out_f, stderr=err_f)
+            except OSError as exc:
+                out.spawn_error = str(exc)
+                out.duration = time.monotonic() - start
+                return out
+            token.attach(proc)
+            # Short waits: on Windows one long wait would hold off signal handlers (Ctrl+C in --run).
+            deadline = start + timeout_s
+            while proc.poll() is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    out.timed_out = True
+                    kill_process_tree(proc)
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    break
+                try:
+                    proc.wait(timeout=min(0.5, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
+            if WINDOWS:
+                _win_release_job(proc, keep_running=not (out.timed_out or token.cancelled))
+            out.exit_code = proc.returncode
+            out_f.seek(0)
+            err_f.seek(0)
+            out.stdout = out_f.read().decode("utf-8", "replace")
+            out.stderr = err_f.read().decode("utf-8", "replace")
+    finally:
+        if stdin_f is not None:
+            stdin_f.close()
     out.cancelled = token.cancelled
     out.duration = time.monotonic() - start
     return out
@@ -426,6 +799,15 @@ def parse_agy_error(stderr: str):
             except ValueError:
                 return {"message": payload}
     return None
+
+
+def agy_error_text(detail: dict) -> str:
+    """The readable part of an AGY_ERROR payload (agy 1.2 writes short_error)."""
+    for key in ("short_error", "message", "error", "status"):
+        value = detail.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _looks_like_report(obj) -> bool:
@@ -533,9 +915,10 @@ class Bridge:
         self.cfg = cfg
         self.slots = threading.BoundedSemaphore(cfg["max_parallel"])
         self.allowed_roots = compute_allowed_roots(cfg)
-        self.log_dir = os.path.expanduser(cfg["log_dir"] or default_log_dir())
+        self.log_dir = native_path(os.path.expanduser(cfg["log_dir"] or default_log_dir()))
         self.schema_json = json.dumps(REPORT_SCHEMA, separators=(",", ":"))
         self._log_lock = threading.Lock()
+        self._last_log_time = None
 
     # -- helpers ----------------------------------------------------------- #
 
@@ -543,7 +926,7 @@ class Bridge:
         cwd = (raw or "").strip() if isinstance(raw, str) else ""
         if not cwd:
             cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-        cwd = os.path.expanduser(cwd)
+        cwd = native_path(os.path.expanduser(cwd))
         if not os.path.isabs(cwd):
             raise ValueError("cwd must be an absolute path, got {!r}".format(raw))
         real = os.path.realpath(cwd)
@@ -555,19 +938,32 @@ class Bridge:
         return real
 
     def _build_argv(self, prompt: str, timeout_min: int, cwd: str, conversation_id):
+        """argv for one agy run, and the index of a bare '{prompt}' element in it (or None).
+
+        That index is None when '{prompt}' is not its own argument (for example embedded in
+        '--prompt={prompt}'): delegate() only reroutes the prompt to stdin (BL-1) for the plain
+        element, exactly as documented for 'command' in DEFAULT_CONFIG.
+        """
+        # C:/x/agy-kit on Windows: understood by native programs and by bash, no mixed separators.
+        kit_dir = KIT_DIR.replace("\\", "/") if WINDOWS else KIT_DIR
         argv = []
+        prompt_idx = None
         for arg in self.cfg["command"]:
             if arg == "{conversation_args}":
                 if conversation_id:
                     argv += ["--conversation", conversation_id]
                 continue
+            if arg == "{prompt}":
+                prompt_idx = len(argv)
+                argv.append(prompt)
+                continue
             value = (arg.replace("{schema}", self.schema_json)
                         .replace("{timeout}", "{}s".format(timeout_min * 60))
-                        .replace("{kit_dir}", KIT_DIR)
+                        .replace("{kit_dir}", kit_dir)
                         .replace("{cwd}", cwd))
             argv.append(value.replace("{prompt}", prompt))  # prompt last: never re-scanned
-        argv[0] = resolve_executable(argv[0])
-        return argv
+        argv[0] = resolve_executable(argv[0])  # replaced in place: prompt_idx still valid
+        return argv, prompt_idx
 
     def _schema_requested(self) -> bool:
         return any("{schema}" in a for a in self.cfg["command"])
@@ -581,13 +977,27 @@ class Bridge:
     def _write_log(self, record: dict):
         try:
             with self._log_lock:
-                os.makedirs(self.log_dir, exist_ok=True)
-                name = "{}-{}.json".format(datetime.now().strftime("%Y%m%d-%H%M%S"), record["id"][:8])
+                # Logs carry the whole prompt and agy's output: owner-only (0700/0600 on POSIX).
+                os.makedirs(self.log_dir, mode=0o700, exist_ok=True)
+                if self.cfg["log_dir"] is None and not WINDOWS:
+                    os.chmod(self.log_dir, 0o700)  # our own directory, possibly created 0755 by agy-kit 1.1
+                now = datetime.now()
+                if self._last_log_time is not None and now <= self._last_log_time:
+                    now = self._last_log_time + timedelta(microseconds=1)  # names sort in writing order
+                self._last_log_time = now
+                name = "{}-{}.json".format(now.strftime("%Y%m%d-%H%M%S-%f"), record["id"][:8])
                 path = os.path.join(self.log_dir, name)
-                with open(path, "w", encoding="utf-8") as fh:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with open(fd, "w", encoding="utf-8") as fh:
                     json.dump(record, fh, ensure_ascii=False, indent=2)
-                files = sorted(f for f in os.listdir(self.log_dir) if f.endswith(".json"))
-                for old in files[: max(0, len(files) - self.cfg["keep_logs"])]:
+                # Rotate only the bridge's own logs (log_dir may be shared), never the one just written.
+                ours = []
+                for f in os.listdir(self.log_dir):
+                    m = LOG_NAME_RE.match(f)
+                    if m and f != name:
+                        ours.append((m.group(1), m.group(2) or "", f))
+                ours.sort()
+                for _, _, old in ours[: max(0, len(ours) + 1 - self.cfg["keep_logs"])]:
                     try:
                         os.remove(os.path.join(self.log_dir, old))
                     except OSError:
@@ -633,13 +1043,31 @@ class Bridge:
                 return {"status": "error", "summary": "timeout_minutes must be an integer", "retryable": False}
 
         prompt = PREAMBLE.format(cwd=cwd) + "\n--- TASK ---\n" + task.strip() + "\n--- END TASK ---\n"
+        prompt_stdin = None
         try:
-            argv = self._build_argv(prompt, timeout_min, cwd, conversation_id)
+            argv, prompt_idx = self._build_argv(prompt, timeout_min, cwd, conversation_id)
+            # BL-1: a native parent (this Python) starting bash.exe truncates every argument MSYS
+            # hands it at 8186 characters (globify); a task above ~7 KB would reach agy mutilated.
+            # Leave '-p' without a value instead and hand the prompt to Popen as stdin: only
+            # agy-ultracode (bin/agy-ultracode) is known to then read the prompt from stdin and
+            # pass it to agy.exe as one argument of its own exec, which bash does not truncate, so
+            # this only kicks in when that is what 'command' actually launches (never a custom
+            # bash-routed command, which may not implement that convention at all).
+            if (prompt_idx is not None and os.path.basename(argv[0]) == "agy-ultracode"
+                    and _windows_launch_via_bash(argv[0])):
+                prompt_stdin = argv[prompt_idx]
+                del argv[prompt_idx]
+            argv, env = platform_command(argv, self._env())
         except FileNotFoundError as exc:
             return {"status": "error", "retryable": False,
                     "summary": "Antigravity launcher not found: {}".format(str(exc)),
                     "hint": "Reinstall agy-kit (./install.sh), or fix the first element of 'command' in "
-                            "~/.config/agy-kit/bridge.json."}
+                            "~/.config/agy-kit/bridge.json. On Windows agy-kit also needs Git for Windows."}
+        problem = command_line_problem(argv, prompt_stdin)
+        if problem:
+            return {"status": "error", "retryable": False,
+                    "summary": "task too long to start Antigravity: {}. Point Antigravity at files instead of "
+                               "pasting their content, or split the task.".format(problem)}
 
         # Wait for a free slot (Antigravity quota and your CPU are finite).
         deadline = time.monotonic() + cfg["queue_wait_minutes"] * 60
@@ -659,7 +1087,7 @@ class Bridge:
         try:
             if token.cancelled:
                 return {"status": "cancelled", "summary": "cancelled before start", "retryable": False}
-            outcome = run_process(argv, cwd, self._env(), timeout_min * 60 + 30, token)
+            outcome = run_process(argv, cwd, env, timeout_min * 60 + 30, token, prompt_stdin=prompt_stdin)
         finally:
             self.slots.release()
 
@@ -671,6 +1099,7 @@ class Bridge:
             "cwd": cwd,
             "argv": [("<prompt>" if a == prompt else a) for a in argv],
             "prompt": prompt,
+            "prompt_via_stdin": prompt_stdin is not None,
             "exit_code": outcome.exit_code,
             "timed_out": outcome.timed_out,
             "cancelled": outcome.cancelled,
@@ -694,6 +1123,7 @@ class Bridge:
 
         envelope = parse_json_object(run.stdout)
         agy_error = parse_agy_error(run.stderr)
+        agy_timed_out = bool(AGY_TIMEOUT_RE.search(run.stderr or ""))  # agy's own --print-timeout
         report = find_report(envelope) if envelope is not None else None
         text = response_text(envelope) if envelope is not None else run.stdout.strip()
         denied = normalize_denied(envelope)
@@ -719,20 +1149,26 @@ class Bridge:
         elif text:
             res["summary"] = _clip(text, cfg["summary_max_chars"])
 
-        if run.timed_out or env_status in ("TIMEOUT", "TIMED_OUT", "DEADLINE_EXCEEDED"):
+        if run.timed_out or agy_timed_out or env_status in ("TIMEOUT", "TIMED_OUT", "DEADLINE_EXCEEDED"):
             res.update(status="timeout", retryable=False,
-                       hint="The task ran past {} minutes. Split it into smaller tasks, or pass a larger "
-                            "timeout_minutes.".format(timeout_min))
-            res.setdefault("summary", "Antigravity did not finish in time.")
+                       hint="Antigravity was stopped after {} minutes in the middle of the task: the workspace "
+                            "may hold half-done changes, check git status and the diff first. Then split the "
+                            "task into smaller ones, or {} with a larger timeout_minutes.".format(
+                                timeout_min, "continue it by passing this conversation_id" if conv
+                                else "delegate it again"))
+            res.setdefault("summary", "Antigravity did not finish within {} minutes.".format(timeout_min))
         elif run.exit_code == 3 or agy_error:
             detail = agy_error or {}
-            res.update(status="error",
-                       retryable=bool(detail.get("retryable", detail.get("retriable", False))),
+            retryable = bool(detail.get("retryable", detail.get("retriable", False)))
+            res.update(status="error", retryable=retryable,
                        summary=_clip("Antigravity agent/model error: {}".format(
-                           detail.get("message") or detail.get("status") or _tail(run.stderr) or "unknown"),
-                           cfg["summary_max_chars"]))
+                           agy_error_text(detail) or _tail(run.stderr) or "unknown"), cfg["summary_max_chars"]))
             if detail:
                 res["agy_error"] = {k: detail[k] for k in list(detail)[:8]}
+            if retryable:
+                res["hint"] = ("Transient Antigravity error. This attempt may already have changed files: check "
+                               "git status, then delegate the task again (with conversation_id, if the report "
+                               "has one, to continue where it stopped).")
         elif run.exit_code not in (0, None):
             res.update(status="error", retryable=False,
                        summary=_clip("agy exited with code {}: {}".format(
@@ -761,10 +1197,13 @@ class Bridge:
                        summary=_clip("agy reported status {}: {}".format(env_status, text or _tail(run.stderr)),
                                      cfg["summary_max_chars"]))
         elif not text.strip():
+            # Never an agy timeout (handled above), so trying again can help.
             res.update(status="empty", retryable=True,
                        summary="agy reported success but returned no answer and no report.",
-                       hint="Known agy headless issue with very long prompts. Shorten the task (reference files "
-                            "instead of pasting them) and retry once.")
+                       hint="Known agy headless issue, mostly with long prompts. This attempt may already have "
+                            "changed files: check git status first. Then shorten the task (reference files "
+                            "instead of pasting them) and delegate it once more, or continue it with "
+                            "conversation_id if the report has one.")
         else:
             res["status"] = "unverified"
             res["retryable"] = False
@@ -775,6 +1214,8 @@ class Bridge:
             res.setdefault("retryable", False)
         else:
             res.pop("retryable", None)
+        if not str(res.get("summary") or "").strip():
+            res["summary"] = "(Antigravity gave no summary)"  # the relay's report schema requires one
         return {k: v for k, v in res.items() if v not in (None, "", [], {})}
 
 
@@ -843,6 +1284,7 @@ class McpServer:
         self._inflight = {}
         self._inflight_lock = threading.RLock()  # re-entrant: shutdown() may run inside a signal handler
         self._threads = []
+        self._closing = False
 
     def send(self, msg: dict) -> None:
         data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
@@ -860,6 +1302,15 @@ class McpServer:
         self.send({"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}})
 
     def serve(self) -> None:
+        # stdin is read in a helper thread: on Windows a blocking read in the main thread would hold
+        # off signal handlers (Ctrl+Break) until the next message arrived.
+        reader = threading.Thread(target=self._read_loop, daemon=True)
+        reader.start()
+        while reader.is_alive():
+            reader.join(0.5)
+        self.shutdown()
+
+    def _read_loop(self) -> None:
         stdin = sys.stdin.buffer
         while True:
             line = stdin.readline()
@@ -880,7 +1331,6 @@ class McpServer:
                     log_stderr("dispatch failed: {!r}".format(exc))
                     if isinstance(item, dict) and "id" in item and "method" in item:
                         self.error(item.get("id"), -32603, "Internal error")
-        self.shutdown()
 
     def dispatch(self, msg) -> None:
         if not isinstance(msg, dict):
@@ -894,7 +1344,8 @@ class McpServer:
 
         if method == "initialize":
             requested = params.get("protocolVersion")
-            version = requested if requested in SUPPORTED_PROTOCOLS else DEFAULT_PROTOCOL
+            # Unsupported version: offer the newest we support, as the MCP spec asks.
+            version = requested if requested in SUPPORTED_PROTOCOLS else SUPPORTED_PROTOCOLS[-1]
             self.respond(mid, {
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": False}},
@@ -909,7 +1360,15 @@ class McpServer:
         elif method == "tools/call":
             if not is_request:
                 return
-            thread = threading.Thread(target=self._handle_call, args=(mid, params), daemon=True)
+            if params.get("name") != TOOL_NAME:
+                self.error(mid, -32602, "Unknown tool: {}".format(params.get("name")))
+                return
+            token = CancelToken()
+            with self._inflight_lock:  # before the thread starts, so an immediate cancel finds it
+                if self._closing:
+                    return  # shutting down: start nothing that could outlive us
+                self._inflight[self._key(mid)] = token
+            thread = threading.Thread(target=self._handle_call, args=(mid, params, token), daemon=True)
             self._threads.append(thread)
             thread.start()
             self._threads = [t for t in self._threads if t.is_alive()]
@@ -930,14 +1389,7 @@ class McpServer:
     def _key(mid) -> str:
         return json.dumps(mid)
 
-    def _handle_call(self, mid, params: dict) -> None:
-        name = params.get("name")
-        if name != TOOL_NAME:
-            self.error(mid, -32602, "Unknown tool: {}".format(name))
-            return
-        token = CancelToken()
-        with self._inflight_lock:
-            self._inflight[self._key(mid)] = token
+    def _handle_call(self, mid, params: dict, token: CancelToken) -> None:
         meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
         progress_token = meta.get("progressToken")
         stop = threading.Event()
@@ -972,6 +1424,7 @@ class McpServer:
 
     def shutdown(self) -> None:
         with self._inflight_lock:
+            self._closing = True
             tokens = list(self._inflight.values())
         for token in tokens:
             token.cancel()
@@ -991,11 +1444,21 @@ def _version_tuple(text: str):
 
 def _run_quiet(argv, timeout: int = 20):
     try:
-        cp = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, timeout=timeout, check=False)
+        argv, env = platform_command(argv, dict(os.environ))
+        cp = subprocess.run(win_command_line(argv) if WINDOWS else argv, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, check=False)
         return cp.returncode, cp.stdout.decode("utf-8", "replace").strip()
     except (OSError, subprocess.SubprocessError) as exc:
         return None, str(exc)
+
+
+def _utf8_stdout() -> None:
+    """Reports may hold any character; a Windows pipe defaults to the ANSI code page."""
+    if WINDOWS:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 def cmd_check() -> int:
@@ -1017,10 +1480,13 @@ def cmd_check() -> int:
 
     try:
         resolved = resolve_executable(cfg["command"][0])
+        launch, _ = platform_command([resolved], None)
     except FileNotFoundError as exc:
         print("  ERROR: launcher not found: {}. Reinstall agy-kit or fix 'command'.".format(exc))
         return 1
     print("launcher: {}".format(resolved))
+    if len(launch) > 1:
+        print("  run through: {}".format(launch[0]))
     cmd = cfg["command"]
     skip_permissions = any("dangerously-skip-permissions" in a for a in cmd)
     conf_claude = None
@@ -1038,13 +1504,16 @@ def cmd_check() -> int:
                 key, _, value = line.partition("=")
                 conf[key.strip()] = value.strip()
         print("mode: agy-kit UltraCode (prompt prefixed with /ultracode; settings from `agy-kit config`)")
-        print("  model: {}  effort: {}  skip-permissions: {}".format(
+        print("  model: {}  effort: {}  skip-permissions: {}{}".format(
             conf.get("AGY_KIT_MODEL", "?"), conf.get("AGY_KIT_EFFORT") or "(none)",
-            conf.get("AGY_KIT_SKIP_PERMISSIONS", "?")))
+            conf.get("AGY_KIT_SKIP_PERMISSIONS", "?"),
+            "  sandbox: " + conf["AGY_KIT_SANDBOX"] if "AGY_KIT_SANDBOX" in conf else ""))
         skip_permissions = skip_permissions or conf.get("AGY_KIT_SKIP_PERMISSIONS") == "1"
-        conf_claude = conf.get("AGY_KIT_CLAUDE_BIN")
-        agy_bin = conf.get("AGY_BIN", "")
-        if agy_bin and os.access(agy_bin, os.X_OK):
+        conf_claude = native_path(conf.get("AGY_KIT_CLAUDE_BIN"))
+        agy_bin = native_path(conf.get("AGY_BIN", ""))  # Git Bash prints /c/.../agy for agy.exe
+        if WINDOWS and agy_bin and not os.path.isfile(agy_bin) and os.path.isfile(agy_bin + ".exe"):
+            agy_bin += ".exe"
+        if agy_bin and os.path.isfile(agy_bin) and os.access(agy_bin, os.X_OK):
             code, out = _run_quiet([agy_bin, "--version"])
             print("agy: {} ({})".format(agy_bin, out.splitlines()[0] if out else "no version output"))
         else:
@@ -1079,7 +1548,7 @@ def cmd_check() -> int:
         print("note: permissions are not skipped, so headless agy auto-denies every action its settings "
               "do not allow (file reads included). See docs/GUIDA_CLAUDE.md, 'Permessi'.")
 
-    claude_name = os.environ.get("AGY_KIT_CLAUDE_BIN") or conf_claude or "claude"
+    claude_name = native_path(os.environ.get("AGY_KIT_CLAUDE_BIN")) or conf_claude or "claude"
     claude = shutil.which(os.path.expanduser(claude_name))
     if claude:
         code, out = _run_quiet([claude, "--version"])
@@ -1093,30 +1562,42 @@ def cmd_check() -> int:
     return 0 if ok else 2
 
 
+STOP_SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK")  # SIGBREAK: Ctrl+Break on Windows
+
+
 def cmd_run(task: str, cwd, timeout_minutes, conversation_id) -> int:
+    _utf8_stdout()
     if task == "-":
-        task = sys.stdin.read()
+        # Not sys.stdin.read(): on Windows a pipe defaults to the ANSI code page (BL-4), and a
+        # task above it would arrive at agy corrupted instead of as the UTF-8 it was sent as.
+        task = sys.stdin.buffer.read().decode("utf-8", "replace")
     try:
         bridge = Bridge(load_config())
     except ConfigError as exc:
         print("config error: {}".format(exc), file=sys.stderr)
         return 1
     token = CancelToken()
-    previous = signal.getsignal(signal.SIGINT)
 
-    def _on_sigint(signum, frame):
+    def _on_signal(signum, frame):
+        # agy runs in a session of its own and would outlive us: cancel it (terminal closed, kill, Ctrl+C).
         token.cancel()
 
-    signal.signal(signal.SIGINT, _on_sigint)
+    previous = {}
+    for name in STOP_SIGNALS:
+        sig = getattr(signal, name, None)
+        if sig is not None and signal.getsignal(sig) is not signal.SIG_IGN:  # nohup stays nohup
+            previous[sig] = signal.signal(sig, _on_signal)
     try:
         result = bridge.delegate({
             "task": task,
-            "cwd": os.path.abspath(cwd or os.getcwd()),
+            "cwd": os.path.abspath(native_path(cwd) or os.getcwd()),
             "timeout_minutes": timeout_minutes,
             "conversation_id": conversation_id,
         }, token)
     finally:
-        signal.signal(signal.SIGINT, previous)
+        for sig, handler in previous.items():
+            if handler is not None:
+                signal.signal(sig, handler)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("status") in OUTCOME_STATUSES else 1
 
@@ -1132,6 +1613,7 @@ def main(argv=None) -> int:
     ns = parser.parse_args(argv)
 
     if ns.check:
+        _utf8_stdout()
         return cmd_check()
     if ns.run is not None:
         return cmd_run(ns.run, ns.cwd, ns.timeout_minutes, ns.conversation_id)
@@ -1144,11 +1626,13 @@ def main(argv=None) -> int:
     server = McpServer(Bridge(cfg))
 
     def _on_signal(signum, frame):
-        # Claude Code stops stdio servers with SIGINT; kill running agy trees first.
+        # For terminals and other clients: Claude Code (2.1.28x) does not send SIGINT, it kills the
+        # server's whole process tree (taskkill /T /F on Windows). agy dies with us anyway: it is our
+        # descendant, and on Windows its Job Object is closed when the bridge dies.
         server.shutdown()
         os._exit(0)
 
-    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+    for name in STOP_SIGNALS:
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), _on_signal)
     try:

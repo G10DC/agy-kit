@@ -1,0 +1,17 @@
+# Fine riga LF per tutto il testo, anche su Windows con core.autocrlf=true:
+# gli script bash con CRLF si rompono.
+* text=auto eol=lf
+
+# Script di cmd.exe, se presenti: CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binari
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.exe binary
