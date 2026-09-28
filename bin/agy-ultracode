@@ -2,13 +2,17 @@
 # ==============================================================================
 # agy-ultracode: avvia Antigravity (agy) in modalità UltraCode.
 #   - modello principale: $AGY_KIT_MODEL (default gemini-3.1-pro) con --effort high
-#   - regole: skill globale `ultracode`, caricata con il comando /ultracode
+#   - regole: skill globale `ultracode`, caricata con il comando /ultracode,
+#     che lo script mette sempre in testa al prompt (-p, -i o task libero)
 #   - sotto-agenti Flash: prescritti dalla skill (invoke_subagent, model flash)
 # Uso:
 #   ultracode                       sessione interattiva
-#   ultracode "task"                sessione interattiva con task iniziale
+#   ultracode "task"                sessione interattiva con task iniziale (-i)
 #   ultracode -p "task"             esecuzione non interattiva (print)
-#   ultracode -c                    altri flag di agy passati invariati
+#   echo "task" | ultracode -p      prompt letto da stdin
+#   ultracode -c ["task"]           altri flag di agy (--mode, --add-dir, …) insieme al task
+#   ultracode --model M "task"      --model ed --effort sostituiscono quelli del kit
+#   ultracode -- "-task"            dopo -- tutto è testo del task
 # ==============================================================================
 set -euo pipefail
 
@@ -23,35 +27,154 @@ KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
 
 case "${1:-}" in
   -h|--help)
-    sed -n '3,12p' "$src" | sed 's/^# \{0,1\}//'
+    sed -n '3,15p' "$src" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 
-agy_kit_require_bin
-agy_kit_base_flags
+SESSION_MSG="Sessione UltraCode attiva. Attendi il mio primo task."
 
-if [ $# -eq 0 ]; then
-  exec "$AGY_BIN" "${BASE_FLAGS[@]}" -i "$(agy_kit_skill_prefix "Sessione UltraCode attiva. Attendi il mio primo task.")"
-fi
-
-has_flag=false
-args=()
-while [ $# -gt 0 ]; do
+# Flag di agy che prendono un valore; tutti gli altri sono booleani e passano invariati.
+value_flag() {
   case "$1" in
-    -p|--print|--prompt)
-      has_flag=true
-      args+=("$1")
-      if [ $# -gt 1 ] && [[ "$2" != -* ]]; then
-        args+=("$(agy_kit_skill_prefix "$2")"); shift
-      fi ;;
-    -*) has_flag=true; args+=("$1") ;;
-    *)  args+=("$1") ;;
+    --add-dir|--agent|--conversation|--effort|--input-format|--json-schema|--log-file|\
+    --mode|--model|--output-format|--print-timeout|--project) return 0 ;;
   esac
-  shift
+  return 1
+}
+prompt_flag() {
+  case "$1" in -p|--print|--prompt|-i|--prompt-interactive) return 0 ;; esac
+  return 1
+}
+# Vero se l'argomento è esattamente un flag di agy: dopo -p/-i qualsiasi altro testo,
+# anche se inizia con '-', è il prompt.
+known_flag() {
+  case "$1" in
+    --|-h|--help|-c|--continue|--dangerously-skip-permissions|--disable-slash-commands|\
+    --new-project|--remote-control|--sandbox) return 0 ;;
+    --*=*|-?=*) value_flag "${1%%=*}" || prompt_flag "${1%%=*}" ;;
+    *) value_flag "$1" || prompt_flag "$1" ;;
+  esac
+}
+two_prompts() {
+  echo "agy-ultracode: indica un solo prompt (-p/--print/--prompt oppure -i/--prompt-interactive)" >&2
+  exit 2
+}
+
+pflag=""; prompt=""; has_prompt=false
+input_format=""
+rest=(); nrest=0     # altri flag di agy, nell'ordine dato
+pos=(); npos=0       # argomenti posizionali: diventano il prompt
+
+# add_value <flag> <valore> <forma: sep|eq>
+add_value() {
+  local v="$2"
+  case "$1" in
+    --model)  AGY_KIT_MODEL="$v"; return 0 ;;    # sostituisce quello del kit
+    --effort) AGY_KIT_EFFORT="$v"; return 0 ;;
+    --input-format) input_format="$v" ;;
+    --add-dir|--log-file) agy_kit_is_windows && v="$(agy_kit_native_path "$v")" ;;
+    --json-schema) if agy_kit_is_windows && [ -f "$v" ]; then v="$(agy_kit_native_path "$v")"; fi ;;
+  esac
+  if [ "$3" = eq ]; then
+    rest+=("$1=$v"); nrest=$((nrest + 1))
+  else
+    rest+=("$1" "$v"); nrest=$((nrest + 2))
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  a="$1"; shift
+  case "$a" in
+    --)
+      while [ $# -gt 0 ]; do pos+=("$1"); npos=$((npos + 1)); shift; done ;;
+    -p|--print|--prompt|-i|--prompt-interactive)
+      [ -z "$pflag" ] || two_prompts
+      pflag="$a"
+      if [ $# -gt 0 ] && ! known_flag "$1"; then
+        prompt="$1"; has_prompt=true; shift
+      fi ;;
+    -p=*|--print=*|--prompt=*|-i=*|--prompt-interactive=*)
+      [ -z "$pflag" ] || two_prompts
+      pflag="${a%%=*}"; prompt="${a#*=}"; has_prompt=true ;;
+    --*=*)
+      if value_flag "${a%%=*}"; then
+        add_value "${a%%=*}" "${a#*=}" eq
+      else
+        rest+=("$a"); nrest=$((nrest + 1))
+      fi ;;
+    -*)
+      if value_flag "$a" && [ $# -gt 0 ]; then
+        add_value "$a" "$1" sep; shift
+      else
+        rest+=("$a"); nrest=$((nrest + 1))   # flag booleano (o valore mancante: ci pensa agy)
+      fi ;;
+    *)
+      pos+=("$a"); npos=$((npos + 1)) ;;
+  esac
 done
 
-if [ "$has_flag" = true ]; then
-  exec "$AGY_BIN" "${BASE_FLAGS[@]}" "${args[@]}"
+if [ $npos -gt 0 ]; then
+  if [ "$has_prompt" = true ]; then
+    echo "agy-ultracode: il prompt è già indicato con $pflag; argomenti in più: ${pos[*]}" >&2
+    echo "  (metti il task tra virgolette in un solo argomento)" >&2
+    exit 2
+  fi
+  prompt="${pos[*]}"; has_prompt=true
+fi
+
+agy_kit_require_bin
+
+# Vero se rest contiene un flag che riprende una conversazione (-c/--continue/--conversation):
+# in tal caso il messaggio di sessione ("Attendi il mio primo task") sarebbe un turno fuorviante
+# dentro la conversazione ripresa (BL-6), quindi si passa solo /ultracode (carica la skill senza
+# istruzioni). Guardia su nrest: in bash 3.2 "${rest[@]}" su un array dichiarato ma vuoto va bene,
+# ma qui si evita comunque di espanderlo quando non serve.
+resumes_conversation() {
+  local x
+  [ $nrest -eq 0 ] && return 1
+  for x in "${rest[@]}"; do
+    case "$x" in -c|--continue|--conversation) return 0 ;; esac
+  done
+  return 1
+}
+
+case "$pflag" in
+  "")
+    pflag="-i"   # nessun flag di prompt: sessione interattiva
+    if [ "$has_prompt" = false ]; then
+      if resumes_conversation; then prompt="/ultracode"; else prompt="$SESSION_MSG"; fi
+    fi
+    has_prompt=true ;;
+  -i|--prompt-interactive)
+    if [ "$has_prompt" = false ]; then
+      if resumes_conversation; then prompt="/ultracode"; else prompt="$SESSION_MSG"; fi
+    fi
+    has_prompt=true ;;
+  *)
+    # -p senza valore: il prompt arriva da stdin (con stream-json lo legge agy, riga per riga)
+    if [ "$has_prompt" = false ] && [ "$input_format" != "stream-json" ]; then
+      if [ -t 0 ]; then
+        echo "agy-ultracode: $pflag senza prompt: scrivi il task dopo $pflag oppure passalo su stdin" >&2
+        exit 2
+      fi
+      prompt="$(cat)"
+      if [ -z "${prompt//[[:space:]]/}" ]; then
+        echo "agy-ultracode: prompt vuoto su stdin" >&2
+        exit 2
+      fi
+      has_prompt=true
+    fi ;;
+esac
+
+agy_kit_base_flags
+if [ "$has_prompt" = true ]; then
+  if [ $nrest -gt 0 ]; then
+    agy_kit_exec_agy "${BASE_FLAGS[@]}" "${rest[@]}" "$pflag" "$(agy_kit_skill_prefix "$prompt")"
+  else
+    agy_kit_exec_agy "${BASE_FLAGS[@]}" "$pflag" "$(agy_kit_skill_prefix "$prompt")"
+  fi
+elif [ $nrest -gt 0 ]; then
+  agy_kit_exec_agy "${BASE_FLAGS[@]}" "${rest[@]}" "$pflag"
 else
-  exec "$AGY_BIN" "${BASE_FLAGS[@]}" -i "$(agy_kit_skill_prefix "${args[*]}")"
+  agy_kit_exec_agy "${BASE_FLAGS[@]}" "$pflag"
 fi

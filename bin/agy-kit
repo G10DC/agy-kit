@@ -15,6 +15,9 @@ KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
 # shellcheck source=../lib/common.sh
 . "$KIT_DIR/lib/common.sh"
 
+# SHEL-6: se lanciato dalla copia installata con percorsi personalizzati, ritrova
+# BIN_DIR/SKILLS_DIR dal manifesto invece dei soli default.
+agy_kit_load_install_paths "$KIT_DIR"
 BIN_DIR="${AGY_KIT_BIN_DIR:-$HOME/.local/bin}"
 SKILLS_DIR="${AGY_KIT_SKILLS_DIR:-$HOME/.gemini/config/skills}"
 
@@ -26,6 +29,21 @@ bad()  { printf '  \033[31m✘\033[0m %s\n' "$*"; fail=$((fail+1)); }
 doctor() {
   local online=false; [ "${1:-}" = "--online" ] && online=true
   echo "agy-kit $(cat "$KIT_DIR/VERSION") — kit in $KIT_DIR"
+
+  echo "Python"
+  if agy_kit_find_python; then
+    pass "Python: $AGY_KIT_PY"
+  elif [ -n "$AGY_KIT_PY_BROKEN" ]; then
+    bad "Python trovato ma non utilizzabile (non si avvia o è più vecchio di 3.8): $AGY_KIT_PY_BROKEN"
+    if agy_kit_is_windows; then
+      echo "     Probabile alias del Microsoft Store: disattivalo in Impostazioni > App >"
+      echo "     Impostazioni app avanzate > Alias di esecuzione delle app (python.exe e python3.exe),"
+      echo "     oppure imposta AGY_KIT_PYTHON nel file $AGY_KIT_CONFIG."
+    fi
+  else
+    bad "nessun Python 3.8+ trovato (cercati: ${AGY_KIT_PYTHON:+$AGY_KIT_PYTHON, }python3, python, py -3)"
+  fi
+
   echo "Binario e modello"
   if [ -x "$AGY_BIN" ]; then pass "agy: $AGY_BIN"; else bad "agy non trovato ($AGY_BIN)"; fi
   local help_out=""; [ -x "$AGY_BIN" ] && help_out="$("$AGY_BIN" --help 2>&1)"
@@ -34,15 +52,51 @@ doctor() {
   else
     bad "agy --help non risponde o non supporta --effort"
   fi
-  echo "  modello: $AGY_KIT_MODEL  effort: ${AGY_KIT_EFFORT:-(nessuno)}  skip-permissions: $AGY_KIT_SKIP_PERMISSIONS"
+  echo "  modello: $AGY_KIT_MODEL  effort: ${AGY_KIT_EFFORT:-(nessuno)}  skip-permissions: $AGY_KIT_SKIP_PERMISSIONS  sandbox: $AGY_KIT_SANDBOX"
 
   echo "Comandi"
   for c in agy-ultracode ultracode agy-compendio compendio compendio-verify agy-kit ultra-ag; do
-    local p; p="$(command -v "$c" 2>/dev/null || true)"
+    local p out rc
+    p="$(command -v "$c" 2>/dev/null || true)"
     if [ -z "$p" ]; then bad "$c non è nel PATH"; continue; fi
-    if [ -x "$p" ]; then pass "$c → $p"; else bad "$c non eseguibile: $p"; fi
+    # PLAT-2: verificarlo eseguendolo, non solo con -x — un comando "installato" può comunque
+    # non partire (per esempio un wrapper Windows che punta a un common.sh introvabile).
+    if [ "$c" = agy-kit ]; then out="$("$c" version </dev/null 2>&1)"; rc=$?
+    else out="$("$c" --help </dev/null 2>&1)"; rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then pass "$c → $p"
+    else bad "$c non si avvia correttamente ($p): $(printf '%s' "$out" | head -1)"
+    fi
   done
   case ":$PATH:" in *":$BIN_DIR:"*) pass "$BIN_DIR è nel PATH" ;; *) wrn "$BIN_DIR non è nel PATH di questa shell" ;; esac
+
+  if agy_kit_is_windows; then
+    echo "Windows (Git Bash)"
+    local gb; gb="$(agy_kit_git_bash 2>/dev/null || true)"
+    if [ -n "$gb" ]; then pass "bash.exe di Git for Windows: $gb"
+    else bad "bash.exe di Git for Windows non trovato (serve al launcher nativo e allo shim .cmd usati da PowerShell/cmd)"
+    fi
+    # `command -v agy` in Git Bash restituisce il percorso senza .exe anche per agy.exe
+    case "$AGY_BIN" in
+      *.exe) pass "agy: eseguibile nativo ($AGY_BIN)" ;;
+      *) if [ -f "$AGY_BIN.exe" ]; then pass "agy: eseguibile nativo ($AGY_BIN.exe)"
+         elif [ -x "$AGY_BIN" ]; then wrn "agy: $AGY_BIN non è un .exe (verifica che non sia uno script incompleto)"
+         fi ;;
+    esac
+    for c in agy-ultracode ultracode agy-compendio compendio compendio-verify agy-kit ultra-ag; do
+      local wp="$BIN_DIR/$c"
+      if [ -f "$wp" ] && grep -q '# agy-kit wrapper' "$wp" 2>/dev/null; then pass "$c: wrapper presente"
+      else wrn "$c: wrapper agy-kit non trovato in $wp (reinstalla con ./install.sh)"
+      fi
+      if [ -f "$wp.exe" ] && grep -aq AgyKitLauncher "$wp.exe" 2>/dev/null; then
+        pass "$c.exe: launcher nativo presente (PowerShell/cmd, argomenti intatti)"
+      elif [ -f "$wp.cmd" ] && grep -qi '^rem agy-kit shim' "$wp.cmd" 2>/dev/null; then
+        wrn "$c: solo lo shim .cmd (limite: da PowerShell/cmd & % ^ e le virgolette vengono interpretati dal loro parser prima di arrivare al comando; reinstalla con ./install.sh per il launcher nativo, serve csc.exe di .NET Framework)"
+      else
+        wrn "$c: né il launcher $c.exe né lo shim $c.cmd sono presenti ($c non sarà utilizzabile da PowerShell/cmd, reinstalla con ./install.sh)"
+      fi
+    done
+  fi
 
   echo "Skill"
   local sk="$SKILLS_DIR/ultracode/SKILL.md"
@@ -52,21 +106,30 @@ doctor() {
   fi
 
   echo "Verificatore"
-  if command -v python3 >/dev/null 2>&1; then
-    pass "python3 $(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:3])))')"
-    if "$KIT_DIR/bin/compendio-verify" --help >/dev/null 2>&1; then pass "compendio-verify eseguibile"; else bad "compendio-verify non parte"; fi
+  if [ -n "${AGY_KIT_PY:-}" ]; then
+    pass "Python per compendio-verify: $AGY_KIT_PY"
+    if "$AGY_KIT_PY" "$KIT_DIR/bin/compendio-verify" --help >/dev/null 2>&1; then pass "compendio-verify eseguibile"
+    else bad "compendio-verify non parte"
+    fi
   else
-    bad "python3 assente: compendio-verify non funzionerà"
+    bad "nessun Python utilizzabile: compendio-verify non funzionerà"
   fi
   command -v pdftotext >/dev/null 2>&1 && pass "pdftotext presente (riferimenti normativi cercati anche nei PDF)" \
     || wrn "pdftotext assente (opzionale: i PDF non sono usati dal controllo W-NORM)"
 
   echo "Shell"
-  local rc found=false
+  local rc found=false o c
   for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
-    [ -f "$rc" ] && grep -q '>>> agy-kit >>>' "$rc" && { pass "blocco agy-kit presente in $rc"; found=true; }
-    if [ -f "$rc" ] && awk '/>>> agy-kit >>>/{b=1} /<<< agy-kit <<</{b=0;next} !b' "$rc" \
-         | grep -Eq "^[[:space:]]*(agy\(\)|alias (ultracode|compendio)=)"; then
+    [ -f "$rc" ] || continue
+    agy_kit_rc_has_block "$rc" || continue
+    set -- $(agy_kit_rc_block_counts "$rc")
+    o="$1"; c="$2"
+    if [ "$o" != "$c" ]; then
+      wrn "$rc ha marcatori agy-kit spaiati ($o apertura/e, $c chiusura/e): sistemali a mano"
+    else
+      pass "blocco agy-kit presente in $rc"; found=true
+    fi
+    if agy_kit_rc_legacy_alias "$rc"; then
       wrn "$rc contiene ancora una vecchia definizione di agy()/alias fuori dal blocco agy-kit"
     fi
   done
@@ -84,38 +147,52 @@ doctor() {
   else
     wrn "Claude Code non trovato: ultra-ag non è utilizzabile (il resto del kit sì)"
   fi
-  if command -v python3 >/dev/null 2>&1 && [ -f "$KIT_DIR/claude/ag_bridge.py" ]; then
+  if [ -n "${AGY_KIT_PY:-}" ] && [ -f "$KIT_DIR/claude/ag_bridge.py" ]; then
     local bout
-    if bout="$(python3 "$KIT_DIR/claude/ag_bridge.py" --check 2>&1)"; then
+    if bout="$("$AGY_KIT_PY" "$KIT_DIR/claude/ag_bridge.py" --check 2>&1)"; then
       pass "bridge Antigravity: configurazione valida ($(bridge_config_path))"
     elif printf '%s' "$bout" | grep -q 'ERROR'; then
       bad "bridge Antigravity: $(printf '%s' "$bout" | grep 'ERROR' | head -1 | sed 's/^ *//')"
     else
-      wrn "bridge Antigravity: controlla gli avvisi di: python3 $KIT_DIR/claude/ag_bridge.py --check"
+      wrn "bridge Antigravity: controlla gli avvisi di: \"$AGY_KIT_PY\" $KIT_DIR/claude/ag_bridge.py --check"
     fi
   fi
 
   if $online; then
     echo "Prova online (una richiesta minima al modello)"
-    local out tmp pid watcher
+    local out tmp pid watcher pid_rc
     tmp="$(mktemp)"
-    # timeout rigido e portabile: senza login agy resta in attesa indefinitamente
-    "$AGY_BIN" --model "$AGY_KIT_MODEL" ${AGY_KIT_EFFORT:+--effort "$AGY_KIT_EFFORT"} \
-      --print-timeout 120s --output-format json \
-      -p "/ultracode Non eseguire task. Rispondi solo con il titolo H1 delle istruzioni UltraCode." \
-      </dev/null >"$tmp" 2>&1 &
+    # Timeout rigido e portabile: senza login agy resta in attesa indefinitamente. La chiamata
+    # passa dall'helper MSYS di common.sh (altrimenti su Windows "/ultracode …" verrebbe
+    # convertito in un percorso di file), e usa la variante che fa exec: backgrounderemo un
+    # subshell che sostituisce se stesso con agy, così $! resta il PID di agy e "kill $pid"
+    # lo raggiunge davvero invece di un layer di shell intermedio.
+    ( agy_kit_exec_agy --model "$AGY_KIT_MODEL" ${AGY_KIT_EFFORT:+--effort "$AGY_KIT_EFFORT"} \
+        --print-timeout 120s --output-format json \
+        -p "/ultracode Non eseguire task. Rispondi solo con il titolo H1 delle istruzioni UltraCode." \
+    ) </dev/null >"$tmp" 2>&1 &
     pid=$!
-    ( sleep 150; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+    # SHEL-8: il watchdog deve uccidere anche il proprio "sleep" (altrimenti resta orfano per
+    # 150s): con un trap sul TERM e sleep in background, il builtin `wait` viene interrotto
+    # subito dal segnale e il trap termina il sleep prima di uscire dal subshell.
+    ( trap 'kill "$!" 2>/dev/null; exit 0' TERM
+      sleep 150 &
+      wait
+      kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
     watcher=$!
-    wait "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null; pid_rc=$?
     kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
     out="$(cat "$tmp")"; rm -f "$tmp"
-    if printf '%s' "$out" | grep -q '"status":"SUCCESS"'; then
+    # Confronto tollerante agli spazi: un JSON con spazi (`"status": "SUCCESS"`) è valido lo
+    # stesso, e non deve essere segnalato come richiesta fallita.
+    if printf '%s' "$out" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"SUCCESS"'; then
       pass "modello $AGY_KIT_MODEL risponde"
       if printf '%s' "$out" | grep -q 'UltraCode Mode'; then pass "skill caricata tramite /ultracode"
       else wrn "risposta ricevuta ma la skill non risulta caricata"; fi
     elif printf '%s' "$out" | grep -qiE 'authentication required|oauth|accounts\.google\.com|not logged in|sign in'; then
       bad "agy non ha effettuato l'accesso: avvia \`agy\` una volta, completa il login nel browser e riprova"
+    elif [ "$pid_rc" -ge 128 ]; then
+      bad "richiesta interrotta dopo 150s (oltre al --print-timeout di agy): agy potrebbe essere bloccato sul login"
     else
       bad "richiesta fallita: $(printf '%s' "$out" | head -c 300)"
       echo "     modelli disponibili: $AGY_BIN models"
@@ -135,11 +212,16 @@ case "${1:-help}" in
   doctor)  shift; doctor "$@" ;;
   version) cat "$KIT_DIR/VERSION" ;;
   config)
+    agy_kit_find_python >/dev/null 2>&1 || true
     echo "config:  $AGY_KIT_CONFIG $([ -f "$AGY_KIT_CONFIG" ] && echo '(presente)' || echo '(assente, uso i default)')"
     echo "AGY_BIN=$AGY_BIN"
     echo "AGY_KIT_MODEL=$AGY_KIT_MODEL"
     echo "AGY_KIT_EFFORT=$AGY_KIT_EFFORT"
     echo "AGY_KIT_SKIP_PERMISSIONS=$AGY_KIT_SKIP_PERMISSIONS"
+    echo "AGY_KIT_SANDBOX=$AGY_KIT_SANDBOX"
+    echo "AGY_KIT_PLAIN_SKIP_PERMISSIONS=$AGY_KIT_PLAIN_SKIP_PERMISSIONS"
+    echo "AGY_KIT_PYTHON=$AGY_KIT_PYTHON"
+    echo "AGY_KIT_PY=${AGY_KIT_PY:-}"
     echo "AGY_KIT_CLAUDE_MODEL=$AGY_KIT_CLAUDE_MODEL"
     echo "AGY_KIT_CLAUDE_BIN=${AGY_KIT_CLAUDE_BIN:-claude}"
     echo "bridge:  $(bridge_config_path) $([ -f "$(bridge_config_path)" ] && echo '(presente)' || echo '(assente, uso i default)')"
