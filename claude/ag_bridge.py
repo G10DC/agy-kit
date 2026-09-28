@@ -81,6 +81,17 @@ REPORT_SCHEMA = {
             "type": "string",
             "description": "What you did and what you found, at most 12 lines.",
         },
+        "answer": {
+            "type": "string",
+            "description": "The complete result the task asks for, in Markdown: findings, extracted data, "
+                           "analysis, the answer to the question, with file/row/page references for every "
+                           "figure or quote. Required for read-only tasks; for edit tasks optional notes.",
+        },
+        "sources": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Files or URLs you consulted.",
+        },
         "files_changed": {
             "type": "array",
             "items": {"type": "string"},
@@ -104,7 +115,7 @@ REPORT_SCHEMA = {
     "required": ["status", "summary", "files_changed"],
 }
 
-PREAMBLE = """You are executing ONE task delegated by an external orchestrator (Claude Code).
+PREAMBLE_COMMON = """You are executing ONE task delegated by an external orchestrator (Claude Code).
 The orchestrator cannot answer questions while you work and will verify your changes afterwards.
 Apply the UltraCode rules (Flash subagents for operational work, verification before you finish);
 where they conflict with the rules below, the rules below win.
@@ -112,12 +123,28 @@ where they conflict with the rules below, the rules below win.
 Rules:
 - Work only inside the workspace: {cwd}
 - Do exactly the task below. Stay inside the files and scope it names; do not refactor or "improve" anything else.
-- Do not commit, push, create branches or change git configuration unless the task explicitly says so.
 - If something is ambiguous, make the most reasonable choice and record it in open_issues.
-- If the task gives a verification command, run it before you finish and report the result.
-- Finish with the report: status (done | partial | failed), a short summary, files_changed
-  (paths relative to the workspace), commands_run, tests, open_issues.
 """
+
+PREAMBLE_EDIT = PREAMBLE_COMMON + """- Do not commit, push, create branches or change git configuration unless the task explicitly says so.
+- If the task gives a verification command, run it before you finish and report the result.
+- If the task also asks for information as well as changes, put that information in answer too (not only summary).
+- Finish with the report: status (done | partial | failed), a short summary, files_changed
+  (paths relative to the workspace), commands_run, tests, open_issues, answer (optional notes).
+"""
+
+PREAMBLE_READ_ONLY = PREAMBLE_COMMON + """- This task is READ-ONLY: do not create, modify, move or delete any file in the workspace. If you need
+  scratch files, put them only in the system's temporary directory, outside the workspace, and remove them
+  before you finish.
+- Put the complete result in answer, in Markdown: findings, extracted data, analysis, the answer to the
+  question, with a file/row/page reference for every figure or quote.
+- summary is a 2-3 line recap only; files_changed stays empty.
+- Do not invent data: if something is not in the material you were given, say so instead of guessing.
+- Finish with the report: status (done | partial | failed), summary (2-3 lines), answer (the full Markdown
+  result), sources (files or URLs you consulted), open_issues.
+"""
+
+PREAMBLES = {"edit": PREAMBLE_EDIT, "read-only": PREAMBLE_READ_ONLY}
 
 DEFAULT_CONFIG = {
     # argv template for one headless Antigravity run. Placeholders:
@@ -144,6 +171,7 @@ DEFAULT_CONFIG = {
     "extra_env": {},
     "max_task_chars": 60000,
     "summary_max_chars": 4000,
+    "answer_max_chars": 20000,
 }
 
 MAX_TIMEOUT_MINUTES = 120
@@ -227,7 +255,7 @@ def load_config() -> dict:
     if not any("{prompt}" in a for a in cmd):
         raise ConfigError("'command' must contain the {prompt} placeholder")
     for key in ("max_parallel", "task_timeout_minutes", "queue_wait_minutes", "keep_logs",
-                "max_task_chars", "summary_max_chars"):
+                "max_task_chars", "summary_max_chars", "answer_max_chars"):
         if not isinstance(cfg[key], int) or isinstance(cfg[key], bool) or cfg[key] < 1:
             raise ConfigError("'{}' must be a positive integer".format(key))
     cfg["task_timeout_minutes"] = min(cfg["task_timeout_minutes"], MAX_TIMEOUT_MINUTES)
@@ -254,6 +282,51 @@ def git_toplevel(path: str):
         return None
     top = out.stdout.decode("utf-8", "replace").strip()
     return top if out.returncode == 0 and top else None
+
+
+def _parse_git_status_z(data: str) -> list:
+    """Paths from `git status --porcelain=v1 -z` (new path for a rename/copy, its own token skipped)."""
+    tokens = data.split("\x00")
+    paths = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if not tok:
+            i += 1
+            continue
+        code, path = tok[:2], tok[3:]
+        paths.append(path)
+        i += 2 if code[0] in ("R", "C") else 1  # rename/copy: the next token is the old path
+    return paths
+
+
+def git_status_snapshot(root: str):
+    """{path: (mtime, size)} for every path `git status` reports dirty in the repo at root, or None if git
+    status could not be run (no git, not a repo, timeout: never raises). A short timeout, since this runs
+    twice around every read-only delegation and must never hang it.
+    """
+    try:
+        out = subprocess.run(["git", "-C", root, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, timeout=8, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    files = {}
+    for path in _parse_git_status_z(out.stdout.decode("utf-8", "replace")):
+        try:
+            st = os.stat(os.path.join(root, path))
+            files[path] = (st.st_mtime, st.st_size)
+        except OSError:
+            files[path] = None  # gone by the time we could stat it
+    return files
+
+
+def diff_git_snapshots(before, after):
+    """Paths whose dirty-or-not status or fingerprint changed between two git_status_snapshot() results."""
+    paths = set(before) | set(after)
+    return sorted(p for p in paths if before.get(p) != after.get(p))
 
 
 def compute_allowed_roots(cfg: dict):
@@ -901,6 +974,18 @@ def _clip(text: str, limit: int) -> str:
     return text[: limit - 40].rstrip() + "\n...[truncated, see log_file]"
 
 
+def _clip_answer(text: str, limit: int, answer_file) -> str:
+    """Like _clip, but the truncation note points to the full copy on disk when there is one."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    note = ("\n...[truncated at {} characters; full answer in {}]".format(limit, answer_file) if answer_file
+            else "\n...[truncated at {} characters]".format(limit))
+    if len(note) >= limit:  # a pathologically small limit: keep the result bounded regardless
+        return note[:limit]
+    return text[: limit - len(note)].rstrip() + note
+
+
 def _tail(text: str, lines: int = 8, limit: int = 1500) -> str:
     chunk = "\n".join((text or "").strip().splitlines()[-lines:])
     return chunk[-limit:]
@@ -1002,9 +1087,32 @@ class Bridge:
                         os.remove(os.path.join(self.log_dir, old))
                     except OSError:
                         pass
+                    try:  # the .answer.md companion of a removed log, if it ever had one
+                        os.remove(os.path.join(self.log_dir, old[: -len(".json")] + ".answer.md"))
+                    except OSError:
+                        pass
                 return path
         except OSError as exc:
             log_stderr("could not write log: {}".format(exc))
+            return None
+
+    def _write_answer_file(self, log_path, text: str):
+        """The full answer next to a log the report's own `answer` may have been truncated from.
+
+        None (no file written) if there is no log_path (the log itself failed to write) or the write fails;
+        delegate() then falls back to a report answer with no answer_file to point to.
+        """
+        if not log_path:
+            return None
+        path = log_path[: -len(".json")] + ".answer.md"
+        try:
+            with self._log_lock:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with open(fd, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            return path
+        except OSError as exc:
+            log_stderr("could not write answer file: {}".format(exc))
             return None
 
     # -- main entry point -------------------------------------------------- #
@@ -1024,6 +1132,12 @@ class Bridge:
                     "summary": "task is {} characters; the limit is {}. Point Antigravity at files "
                                "instead of pasting their content, or split the task."
                                .format(len(task), cfg["max_task_chars"])}
+        mode = args.get("mode")
+        if mode is None:
+            mode = "edit"
+        if not isinstance(mode, str) or mode not in PREAMBLES:
+            return {"status": "error", "retryable": False,
+                    "summary": "mode must be 'edit' or 'read-only', got {!r}".format(mode)}
         try:
             cwd = self._resolve_cwd(args.get("cwd"))
         except ValueError as exc:
@@ -1042,7 +1156,7 @@ class Bridge:
             except (TypeError, ValueError):
                 return {"status": "error", "summary": "timeout_minutes must be an integer", "retryable": False}
 
-        prompt = PREAMBLE.format(cwd=cwd) + "\n--- TASK ---\n" + task.strip() + "\n--- END TASK ---\n"
+        prompt = PREAMBLES[mode].format(cwd=cwd) + "\n--- TASK ---\n" + task.strip() + "\n--- END TASK ---\n"
         prompt_stdin = None
         try:
             argv, prompt_idx = self._build_argv(prompt, timeout_min, cwd, conversation_id)
@@ -1084,19 +1198,52 @@ class Bridge:
                                 "queue_wait_minutes in ~/.config/agy-kit/bridge.json."}
             acquired = self.slots.acquire(timeout=min(1.0, remaining))
 
+        # Read-only: photograph the repo (if any) right around the run, so an unwanted change is caught
+        # even if it lands on a file that was already dirty before we started (its fingerprint changes).
+        git_root = git_toplevel(cwd) if mode == "read-only" else None
+        unexpected_check = None
+        before_snapshot = after_snapshot = None
+        if mode == "read-only":
+            if git_root is None:
+                unexpected_check = "not available: cwd is not inside a git repository"
+            else:
+                before_snapshot = git_status_snapshot(git_root)
+                if before_snapshot is None:
+                    unexpected_check = "not available: git status failed"
+
         try:
             if token.cancelled:
                 return {"status": "cancelled", "summary": "cancelled before start", "retryable": False}
             outcome = run_process(argv, cwd, env, timeout_min * 60 + 30, token, prompt_stdin=prompt_stdin)
+            if git_root is not None and before_snapshot is not None:
+                after_snapshot = git_status_snapshot(git_root)
+                if after_snapshot is None:
+                    unexpected_check = "not available: git status failed"
         finally:
             self.slots.release()
 
-        result = self._classify(outcome, timeout_min)
+        result = self._classify(outcome, timeout_min, mode)
         result["duration_s"] = round(time.monotonic() - started, 1)
+
+        unexpected_changes = None
+        if before_snapshot is not None and after_snapshot is not None:
+            unexpected_check = "checked"
+            unexpected_changes = diff_git_snapshots(before_snapshot, after_snapshot)
+            if unexpected_changes:
+                result["unexpected_changes"] = unexpected_changes
+                open_issues = list(result.get("open_issues") or [])
+                open_issues.append("read-only task modified files in the workspace unexpectedly "
+                                   "(see unexpected_changes)")
+                result["open_issues"] = open_issues
+                result["hint"] = ((result.get("hint") + " ") if result.get("hint") else "") + (
+                    "This was a read-only task (mode: read-only) but files changed in the workspace: run "
+                    "git status/git diff and tell the user before trusting the rest of this report.")
+
         record = {
             "id": run_id,
             "time": datetime.now().isoformat(timespec="seconds"),
             "cwd": cwd,
+            "mode": mode,
             "argv": [("<prompt>" if a == prompt else a) for a in argv],
             "prompt": prompt,
             "prompt_via_stdin": prompt_stdin is not None,
@@ -1106,14 +1253,22 @@ class Bridge:
             "spawn_error": outcome.spawn_error,
             "stdout": outcome.stdout[-200000:],
             "stderr": outcome.stderr[-50000:],
+            "unexpected_changes_check": unexpected_check,
             "result": result,
         }
         log_path = self._write_log(record)
+
+        if result.get("answer"):
+            full_answer = str(result["answer"])
+            answer_path = self._write_answer_file(log_path, full_answer)
+            if answer_path:
+                result["answer_file"] = answer_path
+            result["answer"] = _clip_answer(full_answer, cfg["answer_max_chars"], answer_path)
         if log_path:
             result["log_file"] = log_path
         return result
 
-    def _classify(self, run: RunOutcome, timeout_min: int) -> dict:
+    def _classify(self, run: RunOutcome, timeout_min: int, mode: str = "edit") -> dict:
         cfg = self.cfg
         if run.spawn_error:
             return {"status": "error", "retryable": False,
@@ -1146,6 +1301,10 @@ class Bridge:
             if report.get("tests"):
                 res["tests"] = _clip(str(report.get("tests")), 1500)
             res["open_issues"] = _str_list(report.get("open_issues"), 30)
+            if report.get("answer"):
+                res["answer"] = str(report.get("answer"))
+            if report.get("sources"):
+                res["sources"] = _str_list(report.get("sources"), 100)
         elif text:
             res["summary"] = _clip(text, cfg["summary_max_chars"])
 
@@ -1209,6 +1368,8 @@ class Bridge:
             res["retryable"] = False
             res["hint"] = ("No structured report came back (schema disabled or not honored); the summary is "
                            "Antigravity's final message. Check the diff yourself.")
+            if mode == "read-only":
+                res["answer"] = text
 
         if res["status"] in INFRA_STATUSES:
             res.setdefault("retryable", False)
@@ -1226,12 +1387,17 @@ class Bridge:
 TOOL_DEF = {
     "name": TOOL_NAME,
     "description": (
-        "Delegate ONE self-contained coding task to Antigravity (Google's agent, running the user's "
-        "Ultra Code mode: Gemini Pro orchestrating Gemini Flash workers). Antigravity edits files in `cwd` "
-        "and returns a JSON report: status (done|partial|failed|unverified, or blocked|timeout|error|empty|"
-        "busy|cancelled when the bridge could not get it done), summary, files_changed, commands_run, tests, "
-        "open_issues, denied_actions, conversation_id, retryable. Antigravity cannot see the Claude "
-        "conversation: the task must state goal, files in scope, constraints and the check that proves it."
+        "Delegate ONE self-contained task to Antigravity (Google's agent, running the user's Ultra Code "
+        "mode: Gemini Pro orchestrating Gemini Flash workers). Antigravity is the default executor for "
+        "every practical subagent task: implementation as well as reading, exploring, searching, extracting "
+        "data and analysis. mode 'edit' (default): Antigravity may create, modify and delete files in `cwd`, "
+        "reported in files_changed. mode 'read-only': Antigravity must not change the workspace; the full "
+        "result comes back in `answer`. Returns a JSON report: status (done|partial|failed|unverified, or "
+        "blocked|timeout|error|empty|busy|cancelled when the bridge could not get it done), summary, answer, "
+        "sources, files_changed, unexpected_changes (a read-only task whose workspace changed anyway), "
+        "commands_run, tests, open_issues, denied_actions, conversation_id, answer_file, retryable. "
+        "Antigravity cannot see the Claude conversation: the task must state goal, files in scope, "
+        "constraints and the check (or the shape of the answer) that proves it."
     ),
     "inputSchema": {
         "type": "object",
@@ -1244,6 +1410,14 @@ TOOL_DEF = {
                 "type": "string",
                 "description": "Absolute path of your current working directory (the repository or worktree "
                                "Antigravity should work in).",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["edit", "read-only"],
+                "default": "edit",
+                "description": "'edit' (default): Antigravity may create, modify and delete files in cwd. "
+                               "'read-only': Antigravity must not change the workspace; the result comes "
+                               "back in `answer` instead.",
             },
             "conversation_id": {
                 "type": "string",
@@ -1271,9 +1445,12 @@ TOOL_DEF = {
 }
 
 INSTRUCTIONS = (
-    "antigravity-bridge hands self-contained coding tasks to Google Antigravity's Ultra Code agent (Gemini). "
-    "Call `delegate` once per atomic task with the full task text and your absolute working directory. "
-    "In the Ultracode x Antigravity session this is done through the `antigravity` subagent."
+    "antigravity-bridge hands self-contained tasks to Google Antigravity's Ultra Code agent (Gemini), the "
+    "default executor for every practical subagent task in this session: implementation, but also reading, "
+    "exploring, searching, extracting data and analysis. Call `delegate` once per atomic task with the full "
+    "task text, your absolute working directory, and mode 'read-only' for tasks that must not change files "
+    "(the result then comes back in `answer`). In the Ultracode x Antigravity session this is done through "
+    "the `antigravity` subagent."
 )
 
 
@@ -1565,7 +1742,7 @@ def cmd_check() -> int:
 STOP_SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK")  # SIGBREAK: Ctrl+Break on Windows
 
 
-def cmd_run(task: str, cwd, timeout_minutes, conversation_id) -> int:
+def cmd_run(task: str, cwd, timeout_minutes, conversation_id, mode="edit") -> int:
     _utf8_stdout()
     if task == "-":
         # Not sys.stdin.read(): on Windows a pipe defaults to the ANSI code page (BL-4), and a
@@ -1593,6 +1770,7 @@ def cmd_run(task: str, cwd, timeout_minutes, conversation_id) -> int:
             "cwd": os.path.abspath(native_path(cwd) or os.getcwd()),
             "timeout_minutes": timeout_minutes,
             "conversation_id": conversation_id,
+            "mode": mode,
         }, token)
     finally:
         for sig, handler in previous.items():
@@ -1609,6 +1787,8 @@ def main(argv=None) -> int:
     parser.add_argument("--cwd", help="working directory for --run (default: current directory)")
     parser.add_argument("--timeout-minutes", type=int, help="task timeout for --run")
     parser.add_argument("--conversation-id", help="continue an Antigravity conversation (--run)")
+    parser.add_argument("--mode", choices=["edit", "read-only"], default="edit",
+                        help="task mode for --run: 'edit' (default) or 'read-only'")
     parser.add_argument("--version", action="version", version="%(prog)s " + VERSION)
     ns = parser.parse_args(argv)
 
@@ -1616,7 +1796,7 @@ def main(argv=None) -> int:
         _utf8_stdout()
         return cmd_check()
     if ns.run is not None:
-        return cmd_run(ns.run, ns.cwd, ns.timeout_minutes, ns.conversation_id)
+        return cmd_run(ns.run, ns.cwd, ns.timeout_minutes, ns.conversation_id, ns.mode)
 
     try:
         cfg = load_config()

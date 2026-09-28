@@ -47,6 +47,10 @@ m = re.search(r"SCENARIO=(\w+)", prompt or "")
 scenario = m.group(1) if m else "ok"
 m = re.search(r"SLEEP=([\d.]+)", prompt or "")
 sleep_s = float(m.group(1)) if m else 0.1
+m = re.search(r"LEN=(\d+)", prompt or "")
+answer_len = int(m.group(1)) if m else 5000
+m = re.search(r"TARGET=(\S+)", prompt or "")
+target_name = m.group(1) if m else "TOUCHED.txt"
 
 trace = os.path.join(LOG_DIR, "trace.txt")
 with open(trace, "a") as fh:
@@ -145,6 +149,35 @@ elif scenario == "daemon":
 elif scenario == "reportintext":
     report = {"status": "partial", "summary": "Fatto a metà.", "files_changed": ["a.py"], "open_issues": ["b.py da fare"]}
     envelope["response"] = "```json\n" + json.dumps(report) + "\n```"
+    print(json.dumps(envelope))
+    finish(0)
+elif scenario == "answer":
+    # task read-only: risultato completo in answer, con sources
+    report = {"status": "done", "summary": "Analisi completata.", "files_changed": [],
+              "answer": "## Risultato\nRiga con dato [dati.csv#L5] e fonte.",
+              "sources": ["dati.csv", "https://example.com/doc"]}
+    envelope["response"] = "Fatto."
+    if schema:
+        envelope["structured_output"] = report
+    print(json.dumps(envelope))
+    finish(0)
+elif scenario == "longanswer":
+    # answer molto lunga (LEN=<n> caratteri di corpo), per provare il troncamento del bridge
+    text = "START-OF-ANSWER\n" + ("x" * answer_len) + "\nEND-OF-ANSWER"
+    report = {"status": "done", "summary": "Risposta lunga.", "files_changed": [], "answer": text}
+    envelope["response"] = "Fatto."
+    if schema:
+        envelope["structured_output"] = report
+    print(json.dumps(envelope))
+    finish(0)
+elif scenario == "readonlybad":
+    # viola la regola read-only: modifica un file del workspace (TARGET=<nome>, relativo alla cwd del task)
+    with open(os.path.join(os.getcwd(), target_name), "a", encoding="utf-8") as fh:
+        fh.write("modifica non autorizzata in un task read-only\n")
+    report = {"status": "done", "summary": "Fatto (violando read-only).", "files_changed": []}
+    envelope["response"] = "Fatto."
+    if schema:
+        envelope["structured_output"] = report
     print(json.dumps(envelope))
     finish(0)
 else:

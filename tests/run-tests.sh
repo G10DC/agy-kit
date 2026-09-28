@@ -273,6 +273,15 @@ expect "settings: workflow abilitati e sotto-agenti che ereditano il modello" "T
 grep -q 'Never call the tool a second time' "$KIT/claude/agents.json" && ! grep -q 'call the tool once more' "$KIT/claude/agents.json"
 expect "il relay non ritenta (un solo livello di retry)" "0" "$?"
 
+grep -q 'mode: read-only' "$KIT/claude/agents.json" && grep -qF 'pass mode \"read-only\"' "$KIT/claude/agents.json"
+expect "agents.json: descrizione e prompt del relay gestiscono 'mode: read-only'" "0" "$?"
+expect "agents.json: tools ancora esattamente delegate + ToolSearch" "['ToolSearch', 'mcp__antigravity__delegate']" \
+  "$("$PY" -c 'import json,sys; sys.stdout.write(str(sorted(json.load(open(sys.argv[1], encoding="utf-8"))["antigravity"]["tools"])))' "$KIT/claude/agents.json")"
+grep -q 'mode: read-only' "$KIT/claude/policy.md"
+expect "policy.md: documenta 'mode: read-only'" "0" "$?"
+grep -qF "answer: { type: 'string' }" "$KIT/claude/policy.md"
+expect "policy.md: lo schema AG_REPORT include answer" "0" "$?"
+
 echo "Python e Windows"
 mkdir -p "$T/nopy" "$T/empty"
 for p in python3 python py; do printf '#!/bin/sh\necho "Python non è stato trovato"\nexit 49\n' > "$T/nopy/$p"; chmod +x "$T/nopy/$p"; done

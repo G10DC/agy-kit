@@ -4,7 +4,7 @@ Kit portabile che aggiunge ad Antigravity CLI (`agy`) due modalità, più un pon
 
 - **UltraCode** (`ultracode` / `agy ultracode`): sessione a massimo sforzo con Gemini Pro (`--effort high`). Sotto-agenti Flash per il lavoro operativo e protocollo anti-allucinazione.
 - **Compendio** (`compendio` / `agy compendio`): genera da una cartella una base di conoscenza unica e verificata. Alla fine la controlla con **`compendio-verify`**, che fa controlli deterministici su link, citazioni, hash e dichiarazioni di completezza.
-- **ultra-ag** (`ultra-ag`): Claude Code in modalità ultracode in cui **Opus ragiona e orchestra** e **ogni task atomico di implementazione va a UltraCode** (Gemini Pro + Flash), tramite un relay Haiku e un bridge MCP. Sonnet non viene mai usato. Facoltativo: serve Claude Code 2.1.280 o successivo.
+- **ultra-ag** (`ultra-ag`): Claude Code in modalità ultracode in cui **Opus ragiona, decide e verifica** e **ogni task atomico di lavoro pratico va a UltraCode** (Gemini Pro + Flash) — implementazione, ma anche letture, ricerche, estrazione di dati e analisi (`mode: read-only`, risultato in `answer`) — tramite un relay Haiku e un bridge MCP. Sonnet non viene mai usato. Facoltativo: serve Claude Code 2.1.280 o successivo.
 
 Versione: vedi `VERSION`. Documentazione: [docs/GUIDA_ULTRACODE.md](docs/GUIDA_ULTRACODE.md), [docs/GUIDA_COMPENDIO.md](docs/GUIDA_COMPENDIO.md), [docs/GUIDA_CLAUDE.md](docs/GUIDA_CLAUDE.md). Le regole si trovano in un solo file: [skills/ultracode/SKILL.md](skills/ultracode/SKILL.md).
 
@@ -118,7 +118,7 @@ Le variabili d'ambiente con lo stesso nome prevalgono sul file di config, ad ese
 2. Il prompt inizia **sempre** con **`/ultracode`**, qualunque sia il modo in cui indichi il task: `-p`, `-i`, `-c`, argomenti posizionali o testo letto da stdin. In Antigravity le skill si caricano "on demand": questo comando garantisce che la skill venga caricata in ogni caso.
 3. La skill impone l'uso di sotto-agenti `invoke_subagent` con modello `flash` per il lavoro operativo. Il default del tool sarebbe `inherit`, cioè Pro.
 4. `compendio` si sposta nella cartella da analizzare, avvia la sessione e al termine esegue `compendio-verify`. Il codice d'uscita riflette l'esito della verifica.
-5. `ultra-ag` avvia `claude --model opus --effort ultracode` con un relay `antigravity` (Haiku, un solo tool), la policy di instradamento e il bridge `claude/ag_bridge.py`, che per ogni task lancia `agy-ultracode -p` e restituisce a Opus un report JSON. Opus poi verifica il diff reale.
+5. `ultra-ag` avvia `claude --model opus --effort ultracode` con un relay `antigravity` (Haiku, un solo tool), la policy di instradamento e il bridge `claude/ag_bridge.py`, che per ogni task lancia `agy-ultracode -p` e restituisce a Opus un report JSON (`answer` e `sources` per i task `mode: read-only`, `files_changed` per gli `edit`). Opus poi verifica il diff reale o i dati riportati in `answer`.
 
 ## Test
 

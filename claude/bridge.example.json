@@ -18,5 +18,7 @@
   "_help_logs": "null = ~/.local/state/agy-kit/bridge-logs (un file JSON per task, con prompt e output completi: puo contenere segreti). Deve essere un percorso assoluto (anche con ~). Su macOS/Linux i file sono creati 0600 in una cartella 0700.",
   "log_dir": null,
   "keep_logs": 200,
-  "extra_env": {}
+  "extra_env": {},
+  "_help_answer": "answer_max_chars = lunghezza massima (caratteri) del campo `answer` nel report che torna a Claude Code, per i task read-only e per le note facoltative dei task edit. La risposta completa resta comunque salvata per intero accanto al log, in un file <log>.answer.md il cui percorso torna nel report come answer_file.",
+  "answer_max_chars": 20000
 }
