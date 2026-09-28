@@ -142,7 +142,9 @@ Il relay Haiku **non ritenta mai da solo**: un solo livello di retry, deciso sem
 | `sources` | Il report di Antigravity include `sources` | File o URL consultati per rispondere |
 | `unexpected_changes` | Task `read-only`, `cwd` dentro un repository git, e almeno un file toccato comunque | Percorsi (relativi alla radice del repository) risultati diversi tra la fotografia di `git status` prima e dopo il task. Il report include anche un `open_issues` e un `hint` dedicati |
 
-Se `cwd` di un task `read-only` non è dentro un repository git (o `git` non è disponibile), il bridge non fa la rilevazione: nessun `unexpected_changes` nel report, e il log del task lo annota esplicitamente.
+Se `cwd` di un task `read-only` non è dentro un repository git (o `git` non è disponibile), il bridge non fa la rilevazione: nessun `unexpected_changes` nel report, e il log del task lo annota esplicitamente. La fotografia riguarda l'intero repository: se nello stesso momento un task `edit` (o tu) modifica file nello stesso repository, quelle modifiche compaiono anche in `unexpected_changes` del task `read-only`. Prima di allarmarti, controlla chi ha toccato quei file.
+
+**Prova reale** (Windows, 28/09/2026): a una domanda di analisi ("totale per categoria, spesa più alta, obiettivo rispettato?") su una cartella con un CSV e un file di note, Opus ha scritto un workflow con una fase `antigravity` in `read-only` (Gemini ha letto i file e fatto i calcoli in 63 s, con `sources` e `answer`) e una fase di verifica su Opus; il thread principale ha fatto solo un'occhiata iniziale e un controllo finale.
 
 ## 7. Limiti da conoscere
 
