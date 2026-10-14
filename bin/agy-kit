@@ -53,6 +53,26 @@ doctor() {
     bad "agy --help non risponde o non supporta --effort"
   fi
   echo "  modello: $AGY_KIT_MODEL  effort: ${AGY_KIT_EFFORT:-(nessuno)}  skip-permissions: $AGY_KIT_SKIP_PERMISSIONS  sandbox: $AGY_KIT_SANDBOX"
+  # L'ID deve esistere in `agy models` (non consuma quota, ma interroga il server: timeout breve).
+  # Se non si risolve, -p fallisce e -i ripiega in silenzio su Flash Medium.
+  if [ -x "$AGY_BIN" ]; then
+    if agy_kit_list_models; then
+      if agy_kit_model_in_list; then
+        pass "modello $AGY_KIT_MODEL presente in \`agy models\`"
+      else
+        bad "modello $AGY_KIT_MODEL${AGY_KIT_EFFORT:+ (effort $AGY_KIT_EFFORT)} non presente in \`agy models\`: $( [ -n "$AGY_KIT_EFFORT" ] && echo "con --effort va indicato l'ID senza suffisso" || echo "senza effort va indicato l'ID esatto")"
+        echo "     modelli disponibili: $(printf '%s' "$AGY_KIT_MODEL_IDS" | tr '
+' ' ')"
+        echo "     imposta AGY_KIT_MODEL in $AGY_KIT_CONFIG"
+      fi
+    else
+      wrn "\`agy models\` non risponde (rete o login?): impossibile verificare che il modello $AGY_KIT_MODEL esista"
+    fi
+  fi
+  case "$AGY_KIT_POLICY" in
+    gemini-first|claude-first) pass "policy di ultra-ag: $AGY_KIT_POLICY" ;;
+    *) bad "AGY_KIT_POLICY=$AGY_KIT_POLICY non valido (valori ammessi: gemini-first, claude-first)" ;;
+  esac
 
   echo "Comandi"
   for c in agy-ultracode ultracode agy-compendio compendio compendio-verify agy-kit ultra-ag; do
@@ -224,6 +244,8 @@ case "${1:-help}" in
     echo "AGY_KIT_PY=${AGY_KIT_PY:-}"
     echo "AGY_KIT_CLAUDE_MODEL=$AGY_KIT_CLAUDE_MODEL"
     echo "AGY_KIT_CLAUDE_BIN=${AGY_KIT_CLAUDE_BIN:-claude}"
+    echo "AGY_KIT_POLICY=$AGY_KIT_POLICY"
+    echo "AGY_KIT_CHECK_MODEL=$AGY_KIT_CHECK_MODEL"
     echo "bridge:  $(bridge_config_path) $([ -f "$(bridge_config_path)" ] && echo '(presente)' || echo '(assente, uso i default)')"
     echo "KIT_DIR=$KIT_DIR" ;;
   help|-h|--help) sed -n '2,6p' "$src" | sed 's/^# \{0,1\}//' ;;

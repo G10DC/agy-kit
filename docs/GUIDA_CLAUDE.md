@@ -1,6 +1,6 @@
 # Guida a ultra-ag: Claude Code che delega il lavoro pratico a UltraCode
 
-`ultra-ag` avvia Claude Code in modalità *ultracode* con una divisione dei ruoli precisa: **Opus ragiona, decide, sintetizza e verifica** (con solo qualche occhiata rapida ai file), **ogni task atomico di lavoro pratico va a UltraCode di questo kit** (Gemini Pro con la skill `ultracode`, sotto-agenti Flash) — non solo implementazione, ma anche letture ed esplorazione di codice o documenti, ricerche, estrazione di dati da file (fogli di calcolo, PDF, log) e analisi. Sonnet non viene mai usato.
+`ultra-ag` avvia Claude Code in modalità *ultracode* con una divisione dei ruoli precisa: **Opus ragiona, decide, sintetizza e verifica** (con solo qualche occhiata rapida ai file), **ogni task atomico di lavoro pratico va a UltraCode di questo kit** (Gemini con la skill `ultracode`, sotto-agenti Flash) — non solo implementazione, ma anche letture ed esplorazione di codice o documenti, ricerche, estrazione di dati da file (fogli di calcolo, PDF, log) e analisi. Sonnet non viene mai usato.
 
 In pratica è un Ultracode che sfrutta l'UltraCode di Antigravity. Il normale `claude` resta com'era: la modalità esiste solo dentro `ultra-ag`.
 
@@ -21,7 +21,7 @@ tu ──► ultra-ag  (Claude Code · Opus · effort ultracode)
          │        ▼  mcp__antigravity__delegate (task, cwd, mode: edit | read-only)
          │   claude/ag_bridge.py  (server MCP: coda, timeout, log)
          │        ▼  agy-ultracode -p "/ultracode <task>" --output-format json --json-schema …
-         │   UltraCode:  Gemini Pro (--effort high) ──► sotto-agenti Flash
+         │   UltraCode:  Gemini (AGY_KIT_MODEL, --effort high) ──► sotto-agenti Flash
          │        ▼
          │   report JSON (status, summary, answer, sources, file toccati, test, problemi aperti, …)
          │
@@ -30,7 +30,7 @@ tu ──► ultra-ag  (Claude Code · Opus · effort ultracode)
 
 **Perché c'è un relay su Haiku.** Il runtime dei workflow di Claude Code non può eseguire comandi: può solo avviare subagenti Claude. Ogni foglia "Antigravity" è quindi un subagente minimo che ha un unico tool (la chiamata al bridge), gira su Haiku e non può fare altro. Il lavoro vero lo fa Gemini; il relay costa qualche migliaio di token Haiku per task.
 
-**Una sola configurazione per Antigravity.** Il bridge non chiama `agy` direttamente ma `agy-ultracode`, lo stesso comando di `ultracode -p`. Modello, effort e permessi vengono quindi da `~/.config/agy-kit/config` come per il resto del kit, e il prompt riceve sempre il prefisso `/ultracode`, così la skill viene caricata.
+**Una sola configurazione per Antigravity.** Il bridge non chiama `agy` direttamente ma `agy-ultracode`, lo stesso comando di `ultracode -p`. Modello, effort e permessi vengono quindi da `~/.config/agy-kit/config` come per il resto del kit, e il prompt riceve sempre il prefisso `/ultracode`, così la skill viene caricata. Fa eccezione `mode: read-only`, dove permessi e sandbox sono forzati dal bridge (sezione 5).
 
 **Cosa garantisce cosa.**
 
@@ -39,9 +39,9 @@ tu ──► ultra-ag  (Claude Code · Opus · effort ultracode)
 | Niente Sonnet | `availableModels: ["opus", "haiku"]` in `claude/settings.json` | Rigida **salvo** altre liste `availableModels` in settings utente o di progetto (`~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`): fuori dai managed settings dell'organizzazione questi array si uniscono invece di sostituirsi, quindi un `"sonnet"` in uno qualsiasi di quei file lo riabilita in `ultra-ag` |
 | Ragionamento su Opus | `--model opus --effort ultracode`; gli stadi di verifica senza `model` esplicito ereditano il parent | Rigida anche con un `CLAUDE_CODE_SUBAGENT_MODEL` diverso impostato altrove (per esempio nella shell dell'utente): senza modello esplicito, un subagente guarda prima quella variabile e solo se assente eredita il parent, quindi `ultra-ag` la forza a `inherit` — sia nell'ambiente con cui lancia `claude`, sia nell'`env` di `claude/settings.json` |
 | Workflow attivi | `"enableWorkflows": true` in `claude/settings.json` | Rigida in `ultra-ag`, salvo che l'organizzazione li disattivi esplicitamente. Senza questo flag, su un piano dove i Workflow sono spenti di default `--effort ultracode` verrebbe comunque accettato ma senza orchestrazione: l'intera architettura `agent(..., {agentType:'antigravity'})` salterebbe in silenzio (sul piano Pro, per esempio, i workflow sarebbero spenti finché non li si attiva) |
-| Il lavoro pratico ad Antigravity | `claude/policy.md`, aggiunta al system prompt solo in `ultra-ag` | **Istruzione, non un vincolo tecnico**: Opus la segue (implementazione, ma anche letture, ricerche, estrazione dati e analisi vanno ad Antigravity), ma se glielo chiedi esplicitamente il codice o l'analisi li fa lui stesso. Il tool `mcp__antigravity__delegate` resta comunque richiamabile direttamente, anche da un subagente di verifica che non vede la policy (vedi Permessi) |
+| Il lavoro pratico ad Antigravity | `claude/policy.md` (o `claude/policy-claude-first.md`, vedi `AGY_KIT_POLICY` nella sezione 4), aggiunta al system prompt solo in `ultra-ag` | **Istruzione, non un vincolo tecnico**: Opus la segue (implementazione, ma anche letture, ricerche, estrazione dati e analisi vanno ad Antigravity), ma se glielo chiedi esplicitamente il codice o l'analisi li fa lui stesso. Il tool `mcp__antigravity__delegate` resta comunque richiamabile direttamente, anche da un subagente di verifica che non vede la policy (vedi Permessi) |
 | Il relay non lavora al posto di Gemini | il relay ha due tool: `mcp__antigravity__delegate` più `ToolSearch`, che gli serve a caricare il primo quando non è già visibile | Rigida: nessuno dei due esegue codice o scrive file da solo |
-| Pro orchestra, Flash esegue | skill `ultracode` e flag di `agy-ultracode` | Come in UltraCode (vedi [GUIDA_ULTRACODE.md](GUIDA_ULTRACODE.md)) |
+| Il modello principale orchestra, Flash esegue | skill `ultracode` e flag di `agy-ultracode` | Come in UltraCode (vedi [GUIDA_ULTRACODE.md](GUIDA_ULTRACODE.md)) |
 
 ## 2. Requisiti
 
@@ -84,7 +84,8 @@ Deve stampare un report con `"status": "done"` e il file deve esistere.
 
 | Dove | Chiave | Default | A cosa serve |
 |---|---|---|---|
-| `~/.config/agy-kit/config` | `AGY_KIT_MODEL`, `AGY_KIT_EFFORT`, `AGY_KIT_SKIP_PERMISSIONS`, `AGY_KIT_SANDBOX` | come UltraCode | Il lato Antigravity, identico a `ultracode` (vedi [GUIDA_ULTRACODE.md](GUIDA_ULTRACODE.md)) |
+| `~/.config/agy-kit/config` | `AGY_KIT_MODEL`, `AGY_KIT_EFFORT`, `AGY_KIT_SKIP_PERMISSIONS`, `AGY_KIT_SANDBOX` | come UltraCode | Il lato Antigravity, identico a `ultracode` (in `mode: read-only` skip-permissions e sandbox sono forzati, sezione 5) (vedi [GUIDA_ULTRACODE.md](GUIDA_ULTRACODE.md)) |
+| `~/.config/agy-kit/config` | `AGY_KIT_POLICY` | `gemini-first` | Policy di instradamento di `ultra-ag`. `gemini-first`: Antigravity è l'esecutore predefinito di ogni task (`claude/policy.md`). `claude-first`: Opus ragiona e lavora, Haiku (`model: 'haiku'`) fa il lavoro meccanico, Antigravity interviene solo su richiesta dell'utente o per risparmiare quota Claude (`claude/policy-claude-first.md`). Un valore sconosciuto fa uscire `ultra-ag` con codice 2 prima di avviare Claude Code. Restano uguali in entrambe le varianti read-only, schema `AG_REPORT` e gestione degli `status` |
 | `~/.config/agy-kit/config` | `AGY_KIT_PYTHON` | *(vuoto: ricerca automatica)* | Python usato dal bridge e per generare la configurazione MCP di `ultra-ag` |
 | `~/.config/agy-kit/config` | `AGY_KIT_CLAUDE_MODEL` | `opus` | Modello di Claude Code che orchestra |
 | `~/.config/agy-kit/config` | `AGY_KIT_CLAUDE_BIN` | `claude` nel PATH | Percorso di Claude Code |
@@ -102,7 +103,9 @@ Le variabili `AGY_KIT_*` d'ambiente prevalgono sul file di config, come nel rest
 
 Ogni delega accetta un `conversation_id` opzionale (per continuare una conversazione Antigravity precedente): deve iniziare con una lettera o una cifra, mai con `-`, altrimenti il bridge lo rifiuta prima ancora di avviare `agy`.
 
-Ogni delega accetta anche un `mode`: `edit` (il default) o `read-only`. Con `read-only` il preambolo dice ad Antigravity di non creare, modificare, spostare o cancellare nulla nel workspace e di mettere il risultato completo in `answer`; se `cwd` è dentro un repository git, il bridge fotografa `git status` (più mtime e dimensione dei file elencati) prima e dopo il task, così un file toccato comunque — anche uno che era già modificato prima del task — finisce in `unexpected_changes` nel report, con un `open_issues` e un `hint` che lo segnalano. Un `mode` diverso da `edit`/`read-only` è un errore non ritentabile, prima ancora di avviare `agy`. Un valore non valido di `mode` passato a `--run` da riga di comando viene invece rifiutato subito da `argparse`.
+Il testo del task è racchiuso tra due righe `--- TASK <codice> ---` e `--- END TASK <codice> ---`, con un codice casuale diverso a ogni chiamata annunciato nel preambolo: una riga simile dentro il task (per esempio un `--- END TASK ---` in un contenuto non fidato) non ha il codice giusto e resta testo del task, quindi non può chiudere il blocco.
+
+Ogni delega accetta anche un `mode`: `edit` (il default) o `read-only`. Con `read-only` il preambolo dice ad Antigravity di non creare, modificare, spostare o cancellare nulla nel workspace e di mettere il risultato completo in `answer`; il bridge confronta lo stato della cartella prima e dopo il task, così un file toccato comunque — anche uno che era già modificato prima del task — finisce in `unexpected_changes` nel report, con un `open_issues` e un `hint` che lo segnalano. Dentro un repository git lo stato è `git status` (più mtime e dimensione dei file elencati) e, in più, una fotografia dei file nella cartella di lavoro (esclusa `.git`), perché `git status` non vede i file ignorati da `.gitignore` (`dist/`, `.env`, cache); fuori da git è solo la fotografia (percorso, dimensione, `mtime`). Il tetto è 5000 tra file e cartelle: in un repo git, oltre il tetto resta `git status` e `unexpected_changes_check` dice che i file ignorati non sono controllati. Un task `read-only` gira inoltre sempre senza permessi saltati e con `--sandbox` (sezione 5). Un `mode` diverso da `edit`/`read-only` è un errore non ritentabile, prima ancora di avviare `agy`. Un valore non valido di `mode` passato a `--run` da riga di comando viene invece rifiutato subito da `argparse`.
 
 Timeout lato Claude Code, già impostato: 4 ore per il server MCP (`CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS` in `claude/settings.json`), il limite hard oltre il quale una chiamata al bridge viene comunque interrotta. La regola pratica è `queue_wait_minutes + max(task_timeout_minutes, 120)` sotto i 235 minuti: 120 è il tetto che il bridge applica sia a `task_timeout_minutes` sia al `timeout_minutes` che Opus può chiedere per la singola chiamata (fino a quel valore, indipendentemente dal default di 25), quindi il margine va calcolato su 120 e non sul default.
 
@@ -112,7 +115,9 @@ Timeout lato Claude Code, già impostato: 4 ore per il server MCP (`CLAUDE_ASYNC
 
 **Il tool `delegate` è pre-approvato, non passa dai permessi di Claude Code.** `claude/settings.json` mette `mcp__antigravity__delegate` in `permissions.allow`: una regola allow si risolve subito, quindi in modalità permessi **manuale** ogni delega parte **senza chiedere conferma**. In modalità `auto`, Claude Code scarta di proposito le regole allow più ampie che darebbero esecuzione di codice arbitrario (`Bash(*)`, interpreti, `Agent`, `Monitor`), facendole valutare dal classificatore; `mcp__antigravity__delegate` non è in quell'elenco, quindi resta pre-approvato anche in `auto` e il classificatore non lo vede. Con `AGY_KIT_SKIP_PERMISSIONS=1` (il default) questo equivale, di fatto, a poter eseguire comandi arbitrari sulla macchina a ogni delega: l'unica barriera è il testo del task che Opus scrive (il PREAMBLE dice di restare nel workspace e di non fare commit/push), che un'iniezione di prompt nei contenuti letti da Opus potrebbe aggirare.
 
-Con `AGY_KIT_SKIP_PERMISSIONS=1`, i task delegati girano senza richieste di permesso, come `ultracode`: Antigravity può leggere, scrivere ed eseguire comandi su tutta la macchina. Usalo in repository sotto git di cui ti fidi. Il bridge limita solo la cartella **di partenza** (`allowed_roots`): non è un sandbox (vedi sezione 4).
+**`mode: read-only` ignora `AGY_KIT_SKIP_PERMISSIONS` e `AGY_KIT_SANDBOX` del config.** Il bridge forza `AGY_KIT_SKIP_PERMISSIONS=0` e `AGY_KIT_SANDBOX=1` nell'ambiente di `agy-ultracode` (e toglie un eventuale `--dangerously-skip-permissions` da un `command` personalizzato): un task che deve solo leggere non salta mai i permessi, nemmeno con skip-permissions a `1` nel config, e gira con `--sandbox`. Conseguenza: finché le azioni non sono permesse in `~/.gemini/antigravity-cli/settings.json` (vedi sotto), anche un task read-only può tornare `blocked`, lettura dei file compresa. Un `command` personalizzato che non passa da `agy-ultracode` non riceve `--sandbox` in automatico. `ag_bridge.py --check` lo ricorda.
+
+Con `AGY_KIT_SKIP_PERMISSIONS=1`, i task `edit` delegati girano senza richieste di permesso, come `ultracode`: Antigravity può leggere, scrivere ed eseguire comandi su tutta la macchina. Usalo in repository sotto git di cui ti fidi. Il bridge limita solo la cartella **di partenza** (`allowed_roots`): non è un sandbox (vedi sezione 4).
 
 Con `AGY_KIT_SKIP_PERMISSIONS=0`, in modalità headless `agy` **rifiuta in automatico** ogni azione che le sue impostazioni non permettono, lettura dei file compresa. Il bridge lo segnala con `status: "blocked"` e l'elenco in `denied_actions`. Per lavorare così, apri `agy` in modo interattivo nel repository, fagli fare le azioni tipiche e rispondi *always allow … (Persist to settings.json)*: le regole finiscono in `~/.gemini/antigravity-cli/settings.json` e valgono anche per i task delegati.
 
@@ -126,6 +131,7 @@ Con `AGY_KIT_SKIP_PERMISSIONS=0`, in modalità headless `agy` **rifiuta in autom
 | `partial`, `failed` | Finito in parte o per niente | Chiarisce, aggiunge contesto o spezza il task e lo rimanda **una sola volta** |
 | `unverified` | Nessun report strutturato, solo il testo finale | Come sopra, verificando tutto. Per un task read-only, il testo finale finisce comunque in `answer`/`answer_file` |
 | `blocked` | I permessi di Antigravity hanno rifiutato azioni | Si ferma e ti dice cosa sbloccare (sezione 5) |
+| `quota_exhausted` | `agy` ha risposto 429 / `RESOURCE_EXHAUSTED` (quota esaurita). `isError` vero, mai ritentabile; il campo `quota_reset` riporta quando la quota si ripristina, se `agy` lo dice | **Non** rimanda e non delega altro: ti avvisa citando `quota_reset` |
 | `timeout` | `agy` è stato fermato oltre il timeout — anche dal proprio `--print-timeout`, che lo fa uscire con codice 0 e un avviso su stderr a metà turno | Il task può aver lasciato modifiche a metà: controlla `git status`/`git diff` prima di tutto, poi continua con `conversation_id` o spezza quello che resta |
 | `cancelled` | Il run è stato annullato (da Opus o dall'utente) | Come `timeout`: può aver lasciato modifiche parziali, controlla il diff prima di decidere se il task serve ancora |
 | `busy` | Coda piena troppo a lungo | Manda meno task alla volta, poi rimanda |
@@ -140,9 +146,11 @@ Il relay Haiku **non ritenta mai da solo**: un solo livello di retry, deciso sem
 | `answer` | Task `read-only` (obbligatorio nella richiesta ad Antigravity); facoltativo su un task `edit` | Il risultato completo in Markdown, con riferimenti a file/riga/pagina per ogni numero o citazione. Tagliato ad `answer_max_chars` con una nota di troncamento se supera il limite |
 | `answer_file` | Ogni volta che il report ha un `answer` e il log è stato scritto | Percorso di `<log>.answer.md`, accanto al log: la copia **completa** e mai troncata di `answer`. Utile a Opus se la copia inoltrata dal relay è incompleta |
 | `sources` | Il report di Antigravity include `sources` | File o URL consultati per rispondere |
-| `unexpected_changes` | Task `read-only`, `cwd` dentro un repository git, e almeno un file toccato comunque | Percorsi (relativi alla radice del repository) risultati diversi tra la fotografia di `git status` prima e dopo il task. Il report include anche un `open_issues` e un `hint` dedicati |
+| `unexpected_changes` | Task `read-only` con la rilevazione attiva e almeno un file toccato comunque | Percorsi (relativi alla radice del repository, o alla cartella di lavoro fuori da git) risultati diversi tra la fotografia prima e dopo il task. Il report include anche un `open_issues` e un `hint` dedicati |
+| `unexpected_changes_check` | Ogni task `read-only` | Se la rilevazione è girata: `checked (git status and snapshot of the files in the working folder)`, `checked (git status; files ignored by .gitignore not checked: …)`, `checked (snapshot of the files in the working folder: not a git repository)` oppure `not available: …` con il motivo (troppi file, cartella cresciuta oltre il tetto durante il run). Va letto sempre: `not available` non significa che i file siano intatti |
+| `quota_reset` | `status: quota_exhausted`, se `agy` indica quando la quota si ripristina | Orario ISO come scritto da `agy`, oppure orario UTC calcolato da una durata («retry in 35s», «after 2h30m») |
 
-Se `cwd` di un task `read-only` non è dentro un repository git (o `git` non è disponibile), il bridge non fa la rilevazione: nessun `unexpected_changes` nel report, e il log del task lo annota esplicitamente. La fotografia riguarda l'intero repository: se nello stesso momento un task `edit` (o tu) modifica file nello stesso repository, quelle modifiche compaiono anche in `unexpected_changes` del task `read-only`. Prima di allarmarti, controlla chi ha toccato quei file.
+Se `cwd` di un task `read-only` non è dentro un repository git (o `git` non è disponibile), il bridge fotografa i file della cartella di lavoro. Se ce ne sono più di 5000 (o la cartella cresce oltre il tetto durante il run) la rilevazione non è disponibile: lo dice `unexpected_changes_check`, che arriva sia nel report sia nel log. Il confronto non vede una cartella vuota creata o cancellata. La fotografia riguarda l'intero repository: se nello stesso momento un task `edit` (o tu) modifica file nello stesso repository, quelle modifiche compaiono anche in `unexpected_changes` del task `read-only`. Prima di allarmarti, controlla chi ha toccato quei file.
 
 **Prova reale** (Windows, 28/09/2026): a una domanda di analisi ("totale per categoria, spesa più alta, obiettivo rispettato?") su una cartella con un CSV e un file di note, Opus ha scritto un workflow con una fase `antigravity` in `read-only` (Gemini ha letto i file e fatto i calcoli in 63 s, con `sources` e `answer`) e una fase di verifica su Opus; il thread principale ha fatto solo un'occhiata iniziale e un controllo finale.
 
@@ -150,9 +158,9 @@ Se `cwd` di un task `read-only` non è dentro un repository git (o `git` non è 
 
 - **File in parallelo.** Due task Antigravity paralleli non devono toccare gli stessi file: la policy dice a Opus di separarli o di metterli in sequenza. L'isolamento in worktree non si usa per le foglie Antigravity, perché le modifiche resterebbero nel worktree.
 - **La policy è un'istruzione.** "Il lavoro pratico va ad Antigravity" (implementazione, ma anche letture, ricerche, estrazione dati, analisi) non è un vincolo tecnico: se lo chiedi esplicitamente, il codice o l'analisi li fa Opus. Il divieto di Sonnet invece è rigido.
-- **`mode: read-only` è un'istruzione ad Antigravity, non un sandbox.** Il bridge non impedisce le scritture: le rileva *a posteriori* confrontando `git status` prima e dopo (solo dentro un repository git). Un task read-only su una cartella che non è un repository git non ha questa rete di sicurezza.
+- **`mode: read-only` è un'istruzione ad Antigravity, non un sandbox.** Il bridge non impedisce le scritture: le rileva *a posteriori* confrontando `git status` e una fotografia dei file (fino a 5000) prima e dopo; fuori da git, solo la fotografia. Oltre il tetto non c'è rete di sicurezza e `unexpected_changes_check` lo dichiara. In più il task read-only gira con `--sandbox` e senza permessi saltati, ma l'effetto reale del sandbox sui comandi utili va verificato con un run reale.
 - **Costo per task.** Ogni foglia paga un giro del relay Haiku e l'avvio di `agy`: per modifiche di una riga conviene chiederle direttamente.
-- **Quota Gemini.** Un workflow grande può lanciare molti task: `max_parallel` è il freno.
+- **Quota Gemini.** Un workflow grande può lanciare molti task: `max_parallel` è il freno. A quota esaurita il bridge risponde `quota_exhausted` (non ritentabile); nei log reali di fine settembre/inizio ottobre 33 deleghe su 125 erano fallite per 429.
 - **Il report è una dichiarazione.** Per questo ogni fase di implementazione è seguita da una verifica su Opus basata sul diff reale.
 - **Flag che sostituiscono quelli del kit.** Gli argomenti di `ultra-ag` passano a `claude` dopo quelli del kit: un tuo `--settings`, `--mcp-config`, `--model` o `--agents` può scavalcare esclusione di Sonnet, bridge o relay. Usali solo se sai cosa cambiano.
 - **Classificatore della modalità `auto`.** Senza Sonnet, il classificatore dei permessi di Claude Code gira su Opus e costa di più. Vale solo dentro `ultra-ag`.
@@ -165,7 +173,7 @@ Se `cwd` di un task `read-only` non è dentro un repository git (o `git` non è 
 | `bin/ultra-ag` | Launcher: `claude --model opus --effort ultracode` con i file qui sotto; genera a ogni avvio la configurazione MCP; su Windows forza anche `AGY_KIT_BASH` nell'ambiente del server MCP |
 | `claude/ag_bridge.py` | Server MCP (tool `delegate`) che lancia `agy-ultracode` headless; anche `--check` e `--run` da terminale |
 | `claude/agents.json` | Il relay `antigravity` (Haiku, tool `delegate` + `ToolSearch` per caricarlo) |
-| `claude/policy.md` | Regole di instradamento per Opus, aggiunte al system prompt |
+| `claude/policy.md`, `claude/policy-claude-first.md` | Regole di instradamento per Opus, aggiunte al system prompt (la variante si sceglie con `AGY_KIT_POLICY`) |
 | `claude/settings.json` | `availableModels` senza Sonnet, `enableWorkflows`, `CLAUDE_CODE_SUBAGENT_MODEL=inherit`, permesso al tool del bridge, timeout del server MCP |
 | `claude/bridge.example.json` | Modello di `~/.config/agy-kit/bridge.json` |
 | `tests/test_bridge.py`, `tests/fake_agy.py` | Test offline del bridge (chiamati da `tests/run-tests.sh`) |
@@ -184,21 +192,21 @@ Se `cwd` di un task `read-only` non è dentro un repository git (o `git` non è 
 Su Windows 11 con Git Bash, Python 3.12.10, agy 1.2.8 e Claude Code 2.1.283 (aggiornato per `mode: read-only`, `answer`/`answer_file`/`sources`/`unexpected_changes`):
 
 ```
-tests/run-tests.sh → Esito: 123 superati, 0 falliti
+tests/run-tests.sh → Esito: 148 superati, 0 falliti
 ```
 
 che aggrega, nello stesso run:
 
 | Suite | Copre | Esito |
 |---|---|---|
-| script principale di `run-tests.sh` | parsing di `agy-ultracode` e `agy-compendio`, `agy-kit doctor`/`config`, funzione di shell, `ultra-ag`; su Windows un eseguibile nativo finto verifica che `/ultracode` arrivi intatto e che `MSYS_NO_PATHCONV` non finisca nell'ambiente di `agy`; contenuto di `claude/agents.json` e `claude/policy.md` per `mode: read-only` | 120 superati, 0 falliti |
-| `tests/test_bridge.py` | handshake MCP, timeout reale di `agy` via `--print-timeout`, rotazione e permessi dei log (compresi i `.answer.md` compagni), limiti di lunghezza, annullamento, chiusura su EOF/SIGINT/SIGTERM (POSIX) e Ctrl+Break (Windows); `mode` non valido, preamboli edit/read-only, `answer`/`sources` nel report, troncamento di `answer` con `answer_file` completo, rilevazione di `unexpected_changes` in un repository git (anche su un file già modificato) e nessun falso positivo; su Windows Job Object, Git Bash, prompt su stdin (task di oltre 12.000 caratteri ricevuto identico da un `agy.exe` nativo finto), mai `.cmd` eseguiti direttamente | 135 superati, 0 falliti |
-| `tests/test_compendio_verify.py` | tutti i codici E-\*/W-\*, casi limite, prestazioni (anche righe con 200.000 `[` non chiuse) | 56 superati, 0 falliti |
-| `tests/test_install.sh` | installazione e disinstallazione in sandbox; launcher `.exe` provati da una PowerShell reale (argomenti `a&b`, `50%PATH%`, `a^b`, `sp aces` intatti); ripiego `.cmd` | 66 superati, 0 falliti |
+| script principale di `run-tests.sh` | parsing di `agy-ultracode` e `agy-compendio`, `agy-kit doctor`/`config`, funzione di shell, `ultra-ag`; su Windows un eseguibile nativo finto verifica che `/ultracode` arrivi intatto e che `MSYS_NO_PATHCONV` non finisca nell'ambiente di `agy`; contenuto di `claude/agents.json` e `claude/policy.md` per `mode: read-only` | 145 superati, 0 falliti |
+| `tests/test_bridge.py` | handshake MCP, timeout reale di `agy` via `--print-timeout`, rotazione e permessi dei log (compresi i `.answer.md` compagni), limiti di lunghezza, annullamento, chiusura su EOF/SIGINT/SIGTERM (POSIX) e Ctrl+Break (Windows); `mode` non valido, preamboli edit/read-only, `answer`/`sources` nel report, troncamento di `answer` con `answer_file` completo, rilevazione di `unexpected_changes` in un repository git (anche su un file già modificato) e nessun falso positivo; su Windows Job Object, Git Bash, prompt su stdin (task di oltre 12.000 caratteri ricevuto identico da un `agy.exe` nativo finto), mai `.cmd` eseguiti direttamente | 164 superati, 0 falliti |
+| `tests/test_compendio_verify.py` | tutti i codici E-\*/W-\*, casi limite, prestazioni (anche righe con 200.000 `[` non chiuse) | 64 superati, 0 falliti |
+| `tests/test_install.sh` | installazione e disinstallazione in sandbox; launcher `.exe` provati da una PowerShell reale (argomenti `a&b`, `50%PATH%`, `a^b`, `sp aces` intatti); ripiego `.cmd` | 81 superati, 0 falliti |
 
 **Prove reali sulla stessa macchina** (installazione vera con `./install.sh`, poi):
 
-- `agy-kit doctor --online`: 37 controlli ok, il modello `gemini-3.1-pro` risponde e la skill viene caricata tramite `/ultracode`.
+- `agy-kit doctor --online` (prova storica, prima del 14/10/2026: allora il catalogo aveva `gemini-3.1-pro`, oggi assente): 37 controlli ok, il modello risponde e la skill viene caricata tramite `/ultracode`.
 - `ag_bridge.py --run "Crea il file AG_TEST.md …"` in un repository di prova: `status: done` in 14 s, report strutturato con `conversation_id`, file creato con il contenuto richiesto e nient'altro modificato.
 - `ultra-ag -p "Rispondi solo con la parola OK"`: Claude Code parte con le impostazioni del kit, il server MCP `antigravity` si collega via stdio e alla chiusura viene terminato in modo pulito.
 

@@ -1,6 +1,6 @@
 # Ultracode × Antigravity: routing policy for this session
 
-This session pairs Claude Code ultracode with the user's Antigravity UltraCode mode from agy-kit (Gemini Pro with the `ultracode` skill, orchestrating Gemini Flash subagents). The user wants the work split as follows, and this overrides your usual model choices:
+This session pairs Claude Code ultracode with the user's Antigravity UltraCode mode from agy-kit (Gemini with the `ultracode` skill, orchestrating Gemini Flash subagents). The user wants the work split as follows, and this overrides your usual model choices:
 
 - **You (Opus) do the thinking**: understand the request, plan and decompose it, make decisions, write workflow scripts, judge and verify results, resolve conflicts, synthesize the answer for the user.
 - **Antigravity (Gemini) does the hands-on work**: it is the default executor for every subagent task and for any real work in this session, everyday tasks included. That means reading and exploring code or documents, searching, extracting data from files (spreadsheets, PDFs, logs), computing figures with scripts, research, summaries of material, implementation (code, tests, refactors, migrations, fixes) and running builds or tests. Everywhere Claude Code would normally hand work to a Sonnet or Haiku subagent, hand it to Antigravity instead.
@@ -55,10 +55,11 @@ The relay returns the bridge's JSON report and never retries on its own: every r
 
 - `done`: verify, then move on. For read-only tasks the result is in `answer`; `summary` is only a short recap.
 - `partial`, `failed`, `unverified`: read `summary`, `answer` and `open_issues`; clarify, split or add context, then resend. To continue the same Antigravity conversation for a follow-up, add a line `conversation_id: <id>` (taken from the report) to the new task text.
-- `unexpected_changes` in the report of a read-only task: Antigravity modified files it should not have. Look at them with `git diff` and tell the user.
-- `blocked`: Antigravity's own permissions refused actions (`denied_actions`). Retrying will not help. Tell the user what was denied and point them to the 'Permessi' section of agy-kit's docs/GUIDA_CLAUDE.md (usually: `AGY_KIT_SKIP_PERMISSIONS=1` in `~/.config/agy-kit/config`).
+- `unexpected_changes` in the report of a read-only task: Antigravity modified files it should not have. Look at them with `git diff` and tell the user. `unexpected_changes_check` says whether that check ran (git status, or a snapshot of the folder outside git) or why it could not: if it is `not available`, do not assume the task left the files untouched.
+- `blocked`: Antigravity's own permissions refused actions (`denied_actions`). Retrying will not help. Tell the user what was denied and point them to the 'Permessi' section of agy-kit's docs/GUIDA_CLAUDE.md (for `edit` tasks usually: `AGY_KIT_SKIP_PERMISSIONS=1` in `~/.config/agy-kit/config`; `read-only` tasks always run with permissions on and `--sandbox`, so the fix is allowing the actions in agy's settings, never skipping permissions).
 - `timeout`: the task was interrupted and may have left changes half done. Check the real diff (`git diff`, `git status`) first; then either continue the same conversation with `conversation_id: <id>` or split what is left into smaller tasks.
 - `cancelled`: the run was cancelled (by you or the user). Like `timeout`, it may have left partial changes: check the diff before deciding whether the task is still needed.
+- `quota_exhausted`: Antigravity's quota is used up (429 / RESOURCE_EXHAUSTED). Never resend: it only burns more quota. Do not delegate anything else to Antigravity in this session; tell the user, quoting `quota_reset` (when the quota resets) if present, and ask how to proceed.
 - `busy`: all bridge slots were taken. Send fewer tasks at once, then resend.
 - `error`, `empty`: resend only if `retryable` is true (for `empty`, shorten the task as the `hint` says); otherwise report the error to the user.
 
@@ -70,7 +71,7 @@ If a task is still not done after that one resend, stop and tell the user. Do no
 const AG_REPORT = {
   type: 'object',
   properties: {
-    status: { type: 'string' }, // done | partial | failed | unverified | blocked | timeout | error | empty | busy | cancelled
+    status: { type: 'string' }, // done | partial | failed | unverified | blocked | timeout | error | empty | busy | cancelled | quota_exhausted
     summary: { type: 'string' },
     answer: { type: 'string' },  // full result of read-only tasks (Markdown)
     sources: { type: 'array', items: { type: 'string' } },

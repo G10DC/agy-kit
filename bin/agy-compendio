@@ -148,6 +148,13 @@ Procedura:
    Correggi ogni ERROR (E-COV = file delle fonti non citato nel compendio) e ripeti finché esce con codice 0. Riporta gli avvisi residui nella risposta finale."
 
 agy_kit_base_flags
+# In -i agy non espande /ultracode: il prompt chiede di leggere SKILL.md prima di ogni azione.
+if [ "$MODE" = "-i" ]; then
+  agy_kit_warn_model
+  PROMPT="$(agy_kit_skill_prompt_interactive "$TASK" "$KIT_DIR" "$TARGET_DIR")"
+else
+  PROMPT="$(agy_kit_skill_prefix "$TASK")"
+fi
 
 # Firma del file di destinazione prima della sessione: se esisteva già, deve cambiare.
 signature() { if [ -f "$1" ]; then cksum < "$1"; fi; }
@@ -155,7 +162,7 @@ before="$(signature "$OUTPUT_PATH")"
 
 cd "$TARGET_DIR"
 set +e
-agy_kit_run_agy "${BASE_FLAGS[@]}" "$MODE" "$(agy_kit_skill_prefix "$TASK")"
+agy_kit_run_agy "${BASE_FLAGS[@]}" "$MODE" "$PROMPT"
 status=$?
 set -e
 

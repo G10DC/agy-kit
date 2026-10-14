@@ -1,6 +1,6 @@
 {
   "_help": "agy-kit - bridge Claude Code -> Antigravity (~/.config/agy-kit/bridge.json). Le chiavi che iniziano con _ sono commenti; le chiavi assenti prendono il default. Guida: docs/GUIDA_CLAUDE.md",
-  "_help_command": "Comando per UN task headless. Default: agy-ultracode del kit, che aggiunge modello, effort e permessi da ~/.config/agy-kit/config e antepone /ultracode al prompt. Segnaposto: {prompt} {schema} {timeout} {cwd} {kit_dir}; l'elemento {conversation_args} diventa --conversation <id> oppure sparisce.",
+  "_help_command": "Comando per UN task headless. Default: agy-ultracode del kit, che aggiunge modello, effort e permessi da ~/.config/agy-kit/config e antepone /ultracode al prompt. Segnaposto: {prompt} {schema} {timeout} {cwd} {kit_dir}; l'elemento {conversation_args} diventa --conversation <id> oppure sparisce. Nei task mode read-only il bridge forza nell'ambiente AGY_KIT_SKIP_PERMISSIONS=0 e AGY_KIT_SANDBOX=1 (lo leggono i launcher del kit, agy-ultracode compreso, anche se il config dice il contrario) e toglie un eventuale --dangerously-skip-permissions scritto qui; un comando personalizzato che non passa dai launcher del kit deve aggiungere --sandbox da solo, e in read-only puo tornare blocked (azioni negate).",
   "command": [
     "{kit_dir}/bin/agy-ultracode",
     "--output-format", "json",
@@ -13,9 +13,9 @@
   "max_parallel": 4,
   "task_timeout_minutes": 25,
   "queue_wait_minutes": 90,
-  "_help_roots": "Cartelle da cui un task puo PARTIRE, non un sandbox: con i permessi saltati (AGY_KIT_SKIP_PERMISSIONS=1, il default) Antigravity puo comunque leggere/scrivere ovunque una volta avviato. Vuoto = il progetto di Claude Code e la sua radice git. [\"*\"] = ovunque.",
+  "_help_roots": "Cartelle da cui un task puo PARTIRE, non un sandbox: con i permessi saltati (AGY_KIT_SKIP_PERMISSIONS=1, il default; mai nei task read-only) Antigravity puo comunque leggere/scrivere ovunque una volta avviato. Vuoto = il progetto di Claude Code e la sua radice git. [\"*\"] = ovunque.",
   "allowed_roots": [],
-  "_help_logs": "null = ~/.local/state/agy-kit/bridge-logs (un file JSON per task, con prompt e output completi: puo contenere segreti). Deve essere un percorso assoluto (anche con ~). Su macOS/Linux i file sono creati 0600 in una cartella 0700.",
+  "_help_logs": "null = ~/.local/state/agy-kit/bridge-logs (un file JSON per task, con prompt e output completi: puo contenere segreti). Deve essere un percorso assoluto (anche con ~). Su macOS/Linux i file sono creati 0600 in una cartella 0700; su Windows (Python 3.12.4 o piu' recente) una cartella creata dal bridge ha un'ACL riservata al proprietario, quindi anche una log_dir nuova e' privata; va controllata a mano solo una log_dir personalizzata che esiste gia' (altro disco, cartella condivisa): tiene la sua ACL.",
   "log_dir": null,
   "keep_logs": 200,
   "extra_env": {},

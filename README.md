@@ -2,9 +2,9 @@
 
 Kit portabile che aggiunge ad Antigravity CLI (`agy`) due modalità, più un ponte da Claude Code:
 
-- **UltraCode** (`ultracode` / `agy ultracode`): sessione a massimo sforzo con Gemini Pro (`--effort high`). Sotto-agenti Flash per il lavoro operativo e protocollo anti-allucinazione.
+- **UltraCode** (`ultracode` / `agy ultracode`): sessione a massimo sforzo con il modello configurato in `AGY_KIT_MODEL` (`--effort high`). Sotto-agenti Flash per il lavoro operativo e protocollo anti-allucinazione.
 - **Compendio** (`compendio` / `agy compendio`): genera da una cartella una base di conoscenza unica e verificata. Alla fine la controlla con **`compendio-verify`**, che fa controlli deterministici su link, citazioni, hash e dichiarazioni di completezza.
-- **ultra-ag** (`ultra-ag`): Claude Code in modalità ultracode in cui **Opus ragiona, decide e verifica** e **ogni task atomico di lavoro pratico va a UltraCode** (Gemini Pro + Flash) — implementazione, ma anche letture, ricerche, estrazione di dati e analisi (`mode: read-only`, risultato in `answer`) — tramite un relay Haiku e un bridge MCP. Sonnet non viene mai usato. Facoltativo: serve Claude Code 2.1.280 o successivo.
+- **ultra-ag** (`ultra-ag`): Claude Code in modalità ultracode in cui **Opus ragiona, decide e verifica** e **ogni task atomico di lavoro pratico va a UltraCode** (Gemini + sotto-agenti Flash) — implementazione, ma anche letture, ricerche, estrazione di dati e analisi (`mode: read-only`, risultato in `answer`) — tramite un relay Haiku e un bridge MCP. Sonnet non viene mai usato. Facoltativo: serve Claude Code 2.1.280 o successivo.
 
 Versione: vedi `VERSION`. Documentazione: [docs/GUIDA_ULTRACODE.md](docs/GUIDA_ULTRACODE.md), [docs/GUIDA_COMPENDIO.md](docs/GUIDA_COMPENDIO.md), [docs/GUIDA_CLAUDE.md](docs/GUIDA_CLAUDE.md). Le regole si trovano in un solo file: [skills/ultracode/SKILL.md](skills/ultracode/SKILL.md).
 
@@ -98,12 +98,14 @@ ultra-ag --permission-mode auto            # ogni argomento passa invariato a cl
 
 | Variabile | Default | Significato |
 |---|---|---|
-| `AGY_KIT_MODEL` | `gemini-3.1-pro` | Modello principale. L'elenco completo si ottiene con `agy models`; con `--effort` (il default) va usato l'ID **senza** suffisso di sforzo, es. `gemini-3.1-pro`. Un ID **con** il suffisso (es. `gemini-3.1-pro-low`) va abbinato a `AGY_KIT_EFFORT` vuoto, altrimenti agy rifiuta la combinazione (vedi Risoluzione dei problemi) |
-| `AGY_KIT_EFFORT` | `high` | `low`, `medium` o `high`; vuoto significa che `--effort` non viene passato (allora usa un `AGY_KIT_MODEL` con il suffisso) |
+| `AGY_KIT_MODEL` | `gemini-3.8-flash` | Modello principale. Il catalogo cambia lato server: scegli un ID dall'elenco di `agy models` (al 14/10/2026 non c'è nessun modello Pro). Con `--effort` (il default) va usato l'ID **senza** suffisso di sforzo, es. `gemini-3.8-flash`. Un ID **con** il suffisso (es. `gemini-3.8-flash-low`) va abbinato a `AGY_KIT_EFFORT` vuoto, altrimenti agy rifiuta la combinazione (vedi Risoluzione dei problemi). Se l'ID non si risolve, in `-p` agy fallisce e in `-i` ripiega in silenzio su Flash Medium: `agy-kit doctor` lo controlla |
+| `AGY_KIT_EFFORT` | `high` | `low`, `medium`, `high`, `xhigh` o `max`; vuoto significa che `--effort` non viene passato (allora usa un `AGY_KIT_MODEL` con il suffisso) |
 | `AGY_KIT_SKIP_PERMISSIONS` | `1` | Salta i permessi di UltraCode/Compendio solo con il valore **esatto** `1`; vuoto o qualunque altro valore fa chiedere conferma come di consueto. Se la variabile non è impostata affatto, il default resta `1` |
 | `AGY_KIT_SANDBOX` | `0` | Con `1`, UltraCode e Compendio girano con `agy --sandbox` (restrizioni sul terminale, vedi `agy --help`); consigliato quando Compendio legge documenti di terzi |
 | `AGY_KIT_PLAIN_SKIP_PERMISSIONS` | `0` | Con `1`, anche le sessioni `agy` normali (funzione di shell `agy`) saltano i permessi (sconsigliato). Se la variabile d'ambiente è impostata, anche a `0`, prevale sempre sul file; altrimenti conta l'ultima assegnazione `AGY_KIT_PLAIN_SKIP_PERMISSIONS=` trovata nel file di config |
 | `AGY_KIT_PYTHON` | *(vuoto)* | Percorso di un interprete Python 3.8+. Vuoto = ricerca automatica (`python3`, poi `python`, poi `py -3`), scartando gli interpreti che non si avviano davvero — come l'alias dello Store su Windows |
+| `AGY_KIT_CHECK_MODEL` | `0` | Con `1`, `ultracode` e `compendio` in modalità `-i` avvisano su stderr se il modello non risulta in `agy models` (mai bloccante; spento di default perché `agy models` interroga il server e aggiunge qualche secondo all'avvio) |
+| `AGY_KIT_POLICY` | `gemini-first` | Policy di instradamento di `ultra-ag`: `gemini-first` (Antigravity esecutore predefinito) o `claude-first` (Opus e Haiku lavorano, Antigravity solo su richiesta o per risparmiare quota Claude). Un valore sconosciuto fa uscire `ultra-ag` con codice 2 |
 | `AGY_BIN` | `agy` nel PATH | Percorso del binario, se non è nel PATH |
 | `AGY_KIT_CLAUDE_MODEL` | `opus` | Modello di Claude Code che orchestra in `ultra-ag` |
 | `AGY_KIT_CLAUDE_BIN` | `claude` nel PATH | Percorso di Claude Code |
@@ -115,8 +117,8 @@ Le variabili d'ambiente con lo stesso nome prevalgono sul file di config, ad ese
 ## Come funziona (in breve)
 
 1. `ultracode` e `compendio` avviano `agy --model $AGY_KIT_MODEL --effort $AGY_KIT_EFFORT [--dangerously-skip-permissions] [--sandbox]`.
-2. Il prompt inizia **sempre** con **`/ultracode`**, qualunque sia il modo in cui indichi il task: `-p`, `-i`, `-c`, argomenti posizionali o testo letto da stdin. In Antigravity le skill si caricano "on demand": questo comando garantisce che la skill venga caricata in ogni caso.
-3. La skill impone l'uso di sotto-agenti `invoke_subagent` con modello `flash` per il lavoro operativo. Il default del tool sarebbe `inherit`, cioè Pro.
+2. Il prompt inizia **sempre** con **`/ultracode`**, qualunque sia il modo in cui indichi il task: `-p`, `-i`, `-c`, argomenti posizionali o testo letto da stdin. In Antigravity le skill si caricano "on demand". In `-p` il comando `/ultracode` fa caricare la skill; in `-i` agy non lo espande nel prompt iniziale, quindi in quella modalità (`ultracode` senza `-p`, `compendio` di default) il prompt contiene anche la richiesta esplicita di leggere per intero `SKILL.md` (percorso da `.install-paths`, altrimenti la copia nel kit) prima di ogni altra azione e poi il task. Con `-c`/`--conversation` la richiesta non c'è: la skill è già nella sessione ripresa. È un'istruzione al modello, non un'espansione di agy: per verificarla guarda se la sessione apre `SKILL.md` come prima azione.
+3. La skill impone l'uso di sotto-agenti `invoke_subagent` con modello `flash` per il lavoro operativo. Il default del tool sarebbe `inherit`, cioè il modello principale.
 4. `compendio` si sposta nella cartella da analizzare, avvia la sessione e al termine esegue `compendio-verify`. Il codice d'uscita riflette l'esito della verifica.
 5. `ultra-ag` avvia `claude --model opus --effort ultracode` con un relay `antigravity` (Haiku, un solo tool), la policy di instradamento e il bridge `claude/ag_bridge.py`, che per ogni task lancia `agy-ultracode -p` e restituisce a Opus un report JSON (`answer` e `sources` per i task `mode: read-only`, `files_changed` per gli `edit`). Opus poi verifica il diff reale o i dati riportati in `answer`.
 
@@ -143,11 +145,13 @@ Puoi anche lanciare una singola suite Python, per esempio `"$AGY_KIT_PY" tests/t
 
 | Sintomo | Causa e rimedio |
 |---|---|
-| `invalid model selection … --effort is not supported for model …` | Il nome del modello non è valido per `--effort`. Esegui `agy models` e imposta in config un ID come `gemini-3.1-pro` |
+| `invalid model selection … --effort is not supported for model …` | Il nome del modello non è valido per `--effort`. Esegui `agy models` e imposta in config un ID senza suffisso di sforzo, come `gemini-3.8-flash`; `agy-kit doctor` controlla che `AGY_KIT_MODEL` esista |
+| La sessione `ultracode` interattiva gira su "Flash Medium" invece del modello scelto | `AGY_KIT_MODEL` non si risolve e in `-i` agy ripiega in silenzio. Esegui `agy-kit doctor` (confronta il modello con `agy models`) e imposta un ID presente in elenco; per l'avviso a ogni avvio usa `AGY_KIT_CHECK_MODEL=1` |
 | `agy non ha effettuato l'accesso` (doctor) | Avvia `agy`, completa il login Google nel browser, poi `agy-kit doctor --online` |
 | `ultracode: command not found` | `~/.local/bin` non è nel PATH: apri un nuovo terminale o esegui `source ~/.zshrc` |
 | `agy ultracode` avvia un'altra cosa | Nel file rc c'è una vecchia funzione `agy()` o un vecchio alias fuori dal blocco agy-kit. `agy-kit doctor` la segnala |
-| `ultra-ag`: i task tornano `blocked` | `AGY_KIT_SKIP_PERMISSIONS=0` e Antigravity rifiuta le azioni in modalità headless: vedi [docs/GUIDA_CLAUDE.md](docs/GUIDA_CLAUDE.md), sezione Permessi |
+| `ultra-ag`: i task tornano `quota_exhausted` | Antigravity ha risposto 429 / quota esaurita: non rimandare, aspetta il ripristino (`quota_reset` nel report, se indicato) |
+| `ultra-ag`: i task tornano `blocked` | `AGY_KIT_SKIP_PERMISSIONS=0` (sempre così nei task `read-only`, che girano con permessi attivi e `--sandbox`) e Antigravity rifiuta le azioni in modalità headless: vedi [docs/GUIDA_CLAUDE.md](docs/GUIDA_CLAUDE.md), sezione Permessi |
 | `ultra-ag`: in `/tasks` il relay `antigravity` gira su Opus | Opus gli ha passato un `model` contro la policy: funziona ma costa di più |
 | Il compendio esce con codice 1 | `compendio-verify` ha trovato errori: leggi il report stampato e correggi, oppure chiedi all'agente di farlo |
 | Windows: `agy-kit doctor` segnala Python "trovato ma non utilizzabile" | Di solito è l'alias `python3`/`python` dello Store Microsoft. Disattivalo (Impostazioni → App → Impostazioni app avanzate → Alias di esecuzione delle app) o imposta `AGY_KIT_PYTHON` nel config |
@@ -155,6 +159,16 @@ Puoi anche lanciare una singola suite Python, per esempio `"$AGY_KIT_PY" tests/t
 | Windows: un argomento con `/` passato a `claude` o ad `agy` da Git Bash appare trasformato in un percorso stile `C:/Program Files/Git/...` | Conversione automatica dei percorsi di MSYS. Nelle proprie chiamate ad `agy` il kit esclude dalla conversione solo il prompt (che inizia con `/ultracode`), gli altri argomenti vengono convertiti come per qualsiasi programma Windows; per un tuo argomento manuale, anteponi `MSYS_NO_PATHCONV=1` al comando oppure raddoppia la barra iniziale (`//testo`) |
 | Windows: `agy-kit doctor` segnala "solo lo shim .cmd" | `csc.exe` di .NET Framework (Framework64 o Framework, `v4.0.30319`) o `bash.exe` di Git for Windows non sono stati trovati durante l'installazione: il comando funziona ma da PowerShell/cmd `&`, `%VAR%`, `^` e le virgolette vengono interpretati dal loro parser prima di arrivare al comando. Rilancia `./install.sh` dopo aver installato .NET Framework o Git for Windows, oppure usa Git Bash per i prompt con questi caratteri |
 | Windows: da PowerShell un argomento con virgolette interne (`"`) o un argomento vuoto (`""`) arriva alterato anche al launcher `.exe` | Limite di PowerShell 5.1 stesso (non del kit): perde le virgolette interne e gli argomenti vuoti prima ancora di avviare qualunque `.exe`. Per quei casi usa Git Bash. Da `cmd`, ricorda anche che `%VAR%` viene espanso da `cmd` stesso, come per qualsiasi altro comando |
+
+## Novità della 1.3.0
+
+Correzioni dall'audit di UltraCode del 14/10/2026.
+
+- **Modello**: default `gemini-3.8-flash` (nel catalogo di `agy models` non c'è più nessun Pro). `agy-kit doctor` controlla che `AGY_KIT_MODEL` esista in `agy models` (anche senza `--online`: `agy models` non consuma quota); `AGY_KIT_CHECK_MODEL=1` avvisa a ogni avvio in `-i`. `AGY_KIT_EFFORT` accetta anche `xhigh` e `max`. La skill non dipende più dal nome del modello.
+- **Skill in `-i`**: `ultracode` e `compendio` aggiungono al prompt la richiesta di leggere `SKILL.md` (agy non espande `/ultracode` in `-i`).
+- **`ultra-ag`**: in `mode: read-only` permessi non saltati e `--sandbox` forzati; delimitatore del task con codice casuale (non falsificabile); controllo delle modifiche inattese anche fuori da git (fotografia dei file, fino a 5000) e `unexpected_changes_check` nel report; nuovo stato `quota_exhausted` (non ritentabile, con `quota_reset`); `AGY_KIT_POLICY=gemini-first|claude-first`.
+- **`compendio-verify`**: recinzione non chiusa = `E-FENCE` (ERROR, prima `W-FENCE`); hash accanto a un nome di file in testo semplice = `E-HASH`; "100%" senza punti aperti = `W-100` (prima `E-100` con severità WARN); nuovo avviso `W-QUOTE` sui numeri citati che non compaiono nelle righe indicate.
+- **Test**: `tests/conftest.py` esclude dai test di `pytest` le due suite Python con contatori (niente più verdi falsi); la suite vera è `tests/run-tests.sh`.
 
 ## Novità della 1.2.0
 

@@ -149,7 +149,7 @@ PS1
     powershell.exe -NoProfile -File "$(cygpath -w "$PSARGV/argv.ps1")" >/dev/null 2>&1
     got="$(tail -n 1 "$PSARGV/args" 2>/dev/null || true)"
     expect "a&b, 50%PATH%, a^b, 'sp aces' intatti nel prompt via PowerShell → launcher .exe" \
-      "/ultracode a&b 50%PATH% a^b sp aces" "$got"
+      "a&b 50%PATH% a^b sp aces" "$got"   # in -i il task è l'ultima riga, dopo la richiesta di leggere SKILL.md
   else
     skip "comandi .exe da PowerShell" "powershell.exe non trovato"
   fi
@@ -364,6 +364,81 @@ done
 out="$(PATH="$STOREBIN:$FAKEBIN:/usr/bin:/bin" "$BIN_DIR_D/agy-kit" doctor 2>&1)"
 printf '%s\n' "$out" | grep -qi 'alias di esecuzione'
 expect "PLAT-5: doctor spiega l'alias del Microsoft Store invece di un falso ✔" "0" "$?"
+
+# =============================================================================
+echo "13. doctor: il modello deve esistere in \`agy models\` (audit 6.1)"
+sandbox
+install --no-skill >/dev/null 2>&1
+MODELBIN="$ROOT/modelbin"; mkdir -p "$MODELBIN"
+cat > "$MODELBIN/agy" <<'EOS'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --help) echo "usage: agy [--model M] [--effort E] ..."; exit 0 ;;
+  models)
+    [ -n "${STUB_MODELS_SLEEP:-}" ] && exec sleep "$STUB_MODELS_SLEEP"
+    printf 'Fetching available models...\n'
+    printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
+    printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\nclaude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n'
+    printf 'claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\ngpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n'
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+EOS
+chmod +x "$MODELBIN/agy"
+doc() {  # doc <modello> <effort> [altre variabili d'ambiente…]: stampa l'output di doctor
+  local m="$1" e="$2"; shift 2
+  env PATH="$MODELBIN:$PATH" AGY_BIN="$MODELBIN/agy" AGY_KIT_MODEL="$m" AGY_KIT_EFFORT="$e" "$@" "$BIN_DIR_D/agy-kit" doctor 2>&1
+}
+out="$(doc gemini-3.8-flash high)"
+printf '%s\n' "$out" | grep -q 'modello gemini-3.8-flash presente in `agy models`'
+expect "doctor: con effort, l'ID senza suffisso esiste (gemini-3.8-flash) → ✔" "0" "$?"
+out="$(doc gemini-3.1-pro high)"
+printf '%s\n' "$out" | grep -q 'modello gemini-3.1-pro (effort high) non presente in `agy models`'
+expect "doctor: modello inesistente → errore chiaro" "0" "$?"
+printf '%s\n' "$out" | grep -q 'modelli disponibili: gemini-3.8-flash-high gemini-3.8-flash-medium .*claude-opus-4-6-thinking gpt-oss-120b-medium'
+expect "doctor: elenca i candidati di agy models" "0" "$?"
+printf '%s\n' "$out" | grep -q 'Fetching'
+expect "doctor: l'intestazione di agy models non finisce fra i candidati" "1" "$?"
+doc gemini-3.1-pro high >/dev/null; rc=$?
+expect "doctor: modello inesistente → exit diverso da 0" "1" "$([ $rc -ne 0 ] && echo 1 || echo 0)"
+out="$(doc gemini-3.8-flash '')"
+printf '%s\n' "$out" | grep -q 'senza effort va indicato l.ID esatto'
+expect "doctor: senza effort serve l'ID esatto (gemini-3.8-flash non basta)" "0" "$?"
+out="$(doc gemini-3.8-flash-high '')"
+printf '%s\n' "$out" | grep -q 'modello gemini-3.8-flash-high presente'
+expect "doctor: senza effort l'ID esatto → ✔" "0" "$?"
+out="$(doc claude-opus-4-6-thinking '')"
+printf '%s\n' "$out" | grep -q 'modello claude-opus-4-6-thinking presente'
+expect "doctor: ID senza suffisso effort (claude-opus-4-6-thinking) → ✔" "0" "$?"
+for m in gemini gemini-3.8 gemini-3.8-flash-high claude-sonnet-4-6 claude-opus-4-6-thinking; do
+  out="$(doc "$m" high)"
+  printf '%s\n' "$out" | grep -q "modello $m (effort high) non presente in"
+  expect "doctor: con effort, '$m' (prefisso, ID esatto o suffissato) → errore" "0" "$?"
+done
+out="$(doc gemini-3.8-flash xhigh)"
+printf '%s\n' "$out" | grep -q 'modello gemini-3.8-flash (effort xhigh) non presente in'
+expect "doctor: effort senza ID corrispondente nell'elenco (xhigh) → errore" "0" "$?"
+out="$(doc gemini-3.8-flash medium)"
+printf '%s\n' "$out" | grep -q 'modello gemini-3.8-flash presente in'
+expect "doctor: gemini-3.8-flash con effort medium → ✔" "0" "$?"
+t0=$SECONDS
+out="$(doc gemini-3.8-flash high STUB_MODELS_SLEEP=30 AGY_KIT_MODELS_TIMEOUT=1)"
+printf '%s\n' "$out" | grep -q '`agy models` non risponde'
+expect "doctor: agy models che non risponde → avviso, non errore" "0" "$?"
+printf '%s\n' "$out" | grep -q 'non presente in `agy models`'
+expect "doctor: nessun falso errore sul modello se agy models non risponde" "1" "$?"
+[ $((SECONDS - t0)) -lt 20 ]; expect "doctor: il timeout di agy models è rispettato" "0" "$?"
+out="$(doc gemini-3.8-flash high AGY_KIT_POLICY=boh)"
+printf '%s\n' "$out" | grep -q 'AGY_KIT_POLICY=boh non valido'
+expect "doctor: AGY_KIT_POLICY sconosciuta → errore" "0" "$?"
+out="$(doc gemini-3.8-flash high AGY_KIT_POLICY=claude-first)"
+printf '%s\n' "$out" | grep -q 'policy di ultra-ag: claude-first'
+expect "doctor: AGY_KIT_POLICY=claude-first riconosciuta" "0" "$?"
+out="$(env AGY_KIT_POLICY=claude-first "$BIN_DIR_D/agy-kit" config 2>&1)"
+printf '%s\n' "$out" | grep -qx 'AGY_KIT_POLICY=claude-first'
+expect "agy-kit config mostra AGY_KIT_POLICY" "0" "$?"
+grep -q '^AGY_KIT_MODEL=gemini-3.8-flash$' "$XDG_CONFIG_HOME/agy-kit/config"
+expect "config installata: default AGY_KIT_MODEL=gemini-3.8-flash (nessun Pro)" "0" "$?"
 
 echo
 echo "Esito: $pass superati, $fail falliti"

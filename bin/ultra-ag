@@ -2,7 +2,7 @@
 # ==============================================================================
 # ultra-ag: Claude Code in modalità ultracode che delega l'implementazione ad Antigravity.
 #   - Opus ($AGY_KIT_CLAUDE_MODEL, default opus) ragiona, scompone, verifica
-#   - ogni task atomico va a UltraCode di agy-kit (agy-ultracode: Gemini Pro + sotto-agenti Flash)
+#   - ogni task atomico va a UltraCode di agy-kit (agy-ultracode: Gemini + sotto-agenti Flash)
 #     tramite il relay `antigravity` (Haiku: il tool delegate più ToolSearch per caricarlo)
 #     e il bridge MCP claude/ag_bridge.py
 #   - Sonnet escluso (availableModels in claude/settings.json)
@@ -10,6 +10,7 @@
 #   ultra-ag                        sessione interattiva
 #   ultra-ag --permission-mode auto ogni argomento passa invariato a claude
 #   ultra-ag -p "…" --allowedTools Workflow   non interattivo
+# Policy: AGY_KIT_POLICY=gemini-first (default) | claude-first (Opus/Haiku, Antigravity su richiesta)
 # Guida: docs/GUIDA_CLAUDE.md
 # ==============================================================================
 set -euo pipefail
@@ -25,12 +26,18 @@ KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
 
 case "${1:-}" in
   -h|--help)
-    sed -n '3,13p' "$src" | sed 's/^# \{0,1\}//'
+    sed -n '3,14p' "$src" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 
 CL="$KIT_DIR/claude"
-for f in ag_bridge.py agents.json policy.md settings.json; do
+# Policy di instradamento: AGY_KIT_POLICY=gemini-first (Antigravity esecutore predefinito, default)
+# oppure claude-first (Opus ragiona, Haiku per il lavoro semplice, Antigravity solo su richiesta).
+if ! POLICY_FILE="$(agy_kit_policy_file "$CL")"; then
+  echo "ultra-ag: AGY_KIT_POLICY=$AGY_KIT_POLICY non valido (valori ammessi: gemini-first, claude-first). Correggilo in $AGY_KIT_CONFIG" >&2
+  exit 2
+fi
+for f in ag_bridge.py agents.json "$(basename "$POLICY_FILE")" settings.json; do
   if [ ! -f "$CL/$f" ]; then
     echo "ultra-ag: manca $CL/$f (reinstalla agy-kit con ./install.sh)" >&2
     exit 1
@@ -82,5 +89,5 @@ exec "$CLAUDE_BIN" \
   --settings "$(agy_kit_native_path "$CL/settings.json")" \
   --mcp-config "$MCP_JSON" \
   --agents "$(cat "$CL/agents.json")" \
-  --append-system-prompt-file "$(agy_kit_native_path "$CL/policy.md")" \
+  --append-system-prompt-file "$(agy_kit_native_path "$POLICY_FILE")" \
   "$@"

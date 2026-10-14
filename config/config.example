@@ -1,12 +1,21 @@
 # agy-kit — configurazione locale (~/.config/agy-kit/config)
 # Formato: assegnazioni shell. Le variabili d'ambiente omonime hanno la precedenza.
 
-# Modello principale di UltraCode / Compendio. Elenco dei modelli disponibili: `agy models`
-# (con --effort usare l'ID senza suffisso, es. gemini-3.1-pro; senza effort es. gemini-3.1-pro-high)
-AGY_KIT_MODEL=gemini-3.1-pro
+# Modello principale di UltraCode / Compendio. Va scelto fra gli ID di `agy models` (il catalogo
+# cambia lato server: oggi ci sono gemini-3.8-flash-high/medium/low, claude-sonnet-4-6,
+# claude-opus-4-6-thinking, gpt-oss-120b-medium; nessun Pro). Con --effort si indica l'ID SENZA
+# suffisso (gemini-3.8-flash, non gemini-3.8-flash-high); con AGY_KIT_EFFORT vuoto l'ID esatto
+# (es. gemini-3.8-flash-high, claude-opus-4-6-thinking). Se l'ID non si risolve, in -p agy
+# fallisce e in -i ripiega in silenzio su Flash Medium: `agy-kit doctor` lo verifica.
+AGY_KIT_MODEL=gemini-3.8-flash
 
-# Sforzo di ragionamento: low | medium | high  (vuoto = non passare --effort)
+# Sforzo di ragionamento: low | medium | high | xhigh | max  (vuoto = non passare --effort)
 AGY_KIT_EFFORT=high
+
+# 1 = i launcher in modalità interattiva (-i) controllano con `agy models` che il modello esista
+# e avvisano su stderr se no (mai bloccante; senza rete non dice nulla). Default 0: la chiamata
+# interroga il server e aggiunge qualche secondo a ogni avvio.
+#AGY_KIT_CHECK_MODEL=0
 
 # 1 = UltraCode/Compendio non chiedono permessi per i comandi (comportamento storico, default)
 # 0 o vuoto = agy chiede conferma come di consueto (conta solo il valore esatto 1)
@@ -29,6 +38,11 @@ AGY_KIT_PLAIN_SKIP_PERMISSIONS=0
 # --- ultra-ag: Claude Code che delega l'implementazione a UltraCode (docs/GUIDA_CLAUDE.md) ---
 # Modello di Claude Code che ragiona e orchestra (ultracode). Sonnet è escluso in ogni caso.
 #AGY_KIT_CLAUDE_MODEL=opus
+# Policy di instradamento di ultra-ag (claude/policy*.md):
+#   gemini-first (default) = Antigravity è l'esecutore predefinito, Opus ragiona e verifica
+#   claude-first           = Opus per il lavoro complesso, Haiku per quello semplice,
+#                            Antigravity solo su richiesta o per risparmiare quota Claude
+#AGY_KIT_POLICY=gemini-first
 # Percorso di Claude Code, se non è nel PATH
 #AGY_KIT_CLAUDE_BIN="$HOME/.local/bin/claude"
 # Parallelismo, timeout e cartelle permesse del bridge: ~/.config/agy-kit/bridge.json
