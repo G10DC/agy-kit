@@ -10,7 +10,7 @@ AGY_KIT_CONFIG="${AGY_KIT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agy-kit/conf
 # non deve annullare un AGY_KIT_SANDBOX=1 scritto nel file di config).
 _agy_kit_saved=""
 for _v in AGY_KIT_MODEL AGY_KIT_EFFORT AGY_KIT_SKIP_PERMISSIONS AGY_KIT_SANDBOX AGY_KIT_PLAIN_SKIP_PERMISSIONS \
-          AGY_KIT_PYTHON AGY_BIN AGY_KIT_CLAUDE_MODEL AGY_KIT_CLAUDE_BIN; do
+          AGY_KIT_PYTHON AGY_BIN AGY_KIT_CLAUDE_MODEL AGY_KIT_CLAUDE_BIN AGY_KIT_POLICY AGY_KIT_CHECK_MODEL; do
   if eval "[ -n \"\${$_v+x}\" ]"; then
     if [ "$_v" = AGY_KIT_SANDBOX ] && eval "[ -z \"\${$_v}\" ]"; then
       continue
@@ -29,7 +29,7 @@ fi
 eval "$_agy_kit_saved"
 unset _v _agy_kit_saved _agy_kit_u
 
-AGY_KIT_MODEL="${AGY_KIT_MODEL:-gemini-3.1-pro}"
+AGY_KIT_MODEL="${AGY_KIT_MODEL:-gemini-3.8-flash}"
 AGY_KIT_EFFORT="${AGY_KIT_EFFORT-high}"   # vuoto = non passare --effort
 # Default 1 solo se non impostata; poi conta solo il valore esatto 1 (vuoto = chiede i permessi).
 AGY_KIT_SKIP_PERMISSIONS="${AGY_KIT_SKIP_PERMISSIONS-1}"
@@ -38,6 +38,8 @@ AGY_KIT_PLAIN_SKIP_PERMISSIONS="${AGY_KIT_PLAIN_SKIP_PERMISSIONS:-0}"
 AGY_KIT_PYTHON="${AGY_KIT_PYTHON:-}"      # vuoto = ricerca automatica (agy_kit_find_python)
 # ultra-ag (Claude Code): modello della sessione che ragiona e orchestra
 AGY_KIT_CLAUDE_MODEL="${AGY_KIT_CLAUDE_MODEL:-opus}"
+AGY_KIT_POLICY="${AGY_KIT_POLICY:-gemini-first}"   # gemini-first | claude-first (policy di ultra-ag)
+AGY_KIT_CHECK_MODEL="${AGY_KIT_CHECK_MODEL:-0}"    # 1 = i launcher -i verificano il modello con `agy models`
 
 agy_kit_find_bin() {
   if [ -n "${AGY_BIN:-}" ]; then
@@ -281,5 +283,96 @@ agy_kit_skill_prefix() {
   case "$t" in
     /ultracode|/ultracode[[:space:]]*) printf '%s' "$t" ;;
     *) printf '/ultracode %s' "$1" ;;
+  esac
+}
+
+# Percorso nativo di SKILL.md: quella installata (SKILLS_DIR dal manifesto .install-paths del kit
+# o dal default), altrimenti la copia del kit. Ritorna 1 se non c'è nessuna delle due.
+agy_kit_skill_file() {  # <kit_dir>
+  local sd f
+  agy_kit_load_install_paths "$1"
+  sd="${AGY_KIT_SKILLS_DIR:-$HOME/.gemini/config/skills}"
+  for f in "$sd/ultracode/SKILL.md" "$1/skills/ultracode/SKILL.md"; do
+    if [ -f "$f" ]; then agy_kit_native_path "$f"; return 0; fi
+  done
+  return 1
+}
+
+# Prompt per le sessioni -i. agy non espande '/ultracode' nel prompt iniziale di -i (solo in -p):
+# oltre al prefisso, che resta per l'espansione dove funziona e per l'esclusione MSYS dei percorsi,
+# chiede di leggere SKILL.md prima di qualunque altra azione, così il caricamento non dipende
+# dalla buona volontà del modello. Senza SKILL.md reperibile ripiega sul solo prefisso.
+agy_kit_skill_prompt_interactive() {  # <prompt> <kit_dir> [cartella di lavoro, default $PWD]
+  local task="$1" f t wd="${3:-$PWD}"
+  f="$(agy_kit_skill_file "$2")" || { agy_kit_skill_prefix "$task"; return 0; }
+  t="${task#"${task%%[![:space:]]*}"}"
+  case "$t" in
+    /ultracode) task="" ;;
+    /ultracode[[:space:]]*) t="${t#/ultracode}"; task="${t#"${t%%[![:space:]]*}"}" ;;
+  esac
+  # La cartella di lavoro va detta esplicitamente: con il solo percorso della skill (sotto
+  # ~/.gemini) il modello ha eseguito comandi da ~/.gemini/antigravity-cli/scratch (prova reale 14/10).
+  printf '/ultracode Prima di qualunque altra azione leggi per intero, con lo strumento di lettura file, la skill UltraCode: %s\nApplicane le regole per tutta la sessione; solo dopo procedi con quanto segue.\nCartella di lavoro: %s (file, comandi e ricerche partono da qui, non dalla cartella della skill).' "$f" "$(agy_kit_native_path "$wd")"
+  [ -n "$task" ] && printf '\n\n%s' "$task"
+  return 0
+}
+
+# --- Controllo del modello (`agy models`) ----------------------------------------
+# Con --effort agy vuole l'ID senza suffisso (gemini-3.8-flash), senza effort l'ID esatto
+# (gemini-3.8-flash-high). Se l'ID non si risolve, in -p fallisce e in -i ripiega in silenzio su
+# Flash Medium. Imposta AGY_KIT_MODEL_IDS (un ID per riga); ritorna 1 se agy non risponde entro
+# il timeout o non elenca nessun ID. Timeout rigido e portabile, stesso schema del watchdog di
+# `agy-kit doctor --online`.
+agy_kit_list_models() {  # [timeout in secondi]
+  local t="${1:-${AGY_KIT_MODELS_TIMEOUT:-10}}" tmp pid watcher
+  AGY_KIT_MODEL_IDS=""
+  tmp="$(mktemp)" || return 1
+  ( exec "$AGY_BIN" models ) </dev/null >"$tmp" 2>&1 &
+  pid=$!
+  ( trap 'kill "$!" 2>/dev/null; exit 0' TERM
+    sleep "$t" &
+    wait
+    kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  watcher=$!
+  wait "$pid" 2>/dev/null || true
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  # un ID è minuscolo con almeno un trattino: scarta l'intestazione ("Fetching available models...")
+  AGY_KIT_MODEL_IDS="$(awk '$1 ~ /^[a-z0-9]+(-[a-z0-9.]+)+$/ { print $1 }' "$tmp")"
+  rm -f "$tmp"
+  [ -n "$AGY_KIT_MODEL_IDS" ]
+}
+
+# 0 se AGY_KIT_MODEL (con l'effort corrente) corrisponde a un ID di AGY_KIT_MODEL_IDS.
+# Senza effort serve l'ID esatto. Con --effort agy risolve ID+effort tramite una tabella di alias
+# (gemini-3.8-flash + high → gemini-3.8-flash-high): serve quindi l'ID senza suffisso e deve esistere
+# nell'elenco esattamente "<ID>-<effort>"; l'ID esatto o altri prefissi non si risolvono.
+agy_kit_model_in_list() {
+  local id want="$AGY_KIT_MODEL"
+  [ -n "$AGY_KIT_EFFORT" ] && want="$AGY_KIT_MODEL-$AGY_KIT_EFFORT"
+  while IFS= read -r id; do
+    [ "$id" = "$want" ] && return 0
+  done <<<"$AGY_KIT_MODEL_IDS"
+  return 1
+}
+
+# Controllo opzionale per i launcher in modalità -i (AGY_KIT_CHECK_MODEL=1; di default spento perché
+# `agy models` interroga il server e aggiunge qualche secondo a ogni avvio). Solo un avviso su
+# stderr: senza rete, con agy che non risponde o con l'elenco vuoto non blocca né dice nulla.
+agy_kit_warn_model() {
+  [ "$AGY_KIT_CHECK_MODEL" = "1" ] || return 0
+  agy_kit_list_models "${AGY_KIT_MODELS_TIMEOUT:-8}" || return 0
+  agy_kit_model_in_list && return 0
+  echo "agy-kit: attenzione: il modello '$AGY_KIT_MODEL'${AGY_KIT_EFFORT:+ con effort '$AGY_KIT_EFFORT'} non risulta in \`agy models\`:" >&2
+  echo "         in modalità interattiva agy ripiegherebbe in silenzio su Flash Medium. Disponibili: $(printf '%s' "$AGY_KIT_MODEL_IDS" | tr '\n' ' ')" >&2
+  return 0
+}
+
+# File di policy di ultra-ag per AGY_KIT_POLICY; ritorna 1 se il valore è sconosciuto.
+agy_kit_policy_file() {  # <cartella claude/>
+  case "$AGY_KIT_POLICY" in
+    gemini-first) printf '%s\n' "$1/policy.md" ;;
+    claude-first) printf '%s\n' "$1/policy-claude-first.md" ;;
+    *) return 1 ;;
   esac
 }

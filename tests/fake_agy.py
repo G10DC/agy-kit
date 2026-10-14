@@ -103,6 +103,34 @@ elif scenario == "agyerror":
     # formato di agy 1.2: AGY_ERROR: {"short_error": ..., "retryable": ..., "error_id": ...}
     sys.stderr.write('log\nAGY_ERROR: {"short_error":"model overloaded","retryable":true,"error_id":"e-503"}\n')
     finish(3)
+elif scenario == "quota":
+    # quota esaurita: AGY_ERROR con retryable=true (agy la crede transitoria) e durata del reset nel messaggio
+    sys.stderr.write('log\nAGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED: quota exceeded for this model. '
+                     'Your quota will reset after 2h30m15s.","retryable":true,"error_id":"e-429"}\n')
+    finish(3)
+elif scenario == "quotareal":
+    # formato reale di agy 1.3 (log del bridge): stdout JSON con status ERROR e lo stesso testo in AGY_ERROR su stderr
+    msg = ("RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription"
+           "… Resets in 2h33m43s.")
+    envelope.update(status="ERROR", error=msg)
+    print(json.dumps(envelope))
+    sys.stderr.write("AGY_ERROR: " + json.dumps({"short_error": msg, "retryable": False, "error_id": "e-429"}) + "\n")
+    finish(3)
+elif scenario == "quota429":
+    # niente AGY_ERROR: solo stderr con 429 e orario di reset assoluto
+    sys.stderr.write("request failed: HTTP status 429 Too Many Requests. Your quota resets at 2026-10-15T03:00:00Z\n")
+    finish(1)
+elif scenario == "crash429":
+    # un 429 qualunque (numero di riga) non e' quota: errore generico
+    sys.stderr.write('Traceback (most recent call last):\n  File "agent.py", line 429, in run\nValueError: boom\n')
+    finish(1)
+elif scenario == "quotatext":
+    # report valido che parla di quota: resta done, non diventa quota_exhausted
+    envelope["structured_output"] = {"status": "done", "summary": "Spiegata la quota mensile e l'errore 429.",
+                                     "files_changed": []}
+    envelope["response"] = "ok"
+    print(json.dumps(envelope))
+    finish(0)
 elif scenario == "exit3":
     sys.stderr.write("agent crashed without details\n")
     finish(3)
@@ -174,6 +202,17 @@ elif scenario == "readonlybad":
     # viola la regola read-only: modifica un file del workspace (TARGET=<nome>, relativo alla cwd del task)
     with open(os.path.join(os.getcwd(), target_name), "a", encoding="utf-8") as fh:
         fh.write("modifica non autorizzata in un task read-only\n")
+    report = {"status": "done", "summary": "Fatto (violando read-only).", "files_changed": []}
+    envelope["response"] = "Fatto."
+    if schema:
+        envelope["structured_output"] = report
+    print(json.dumps(envelope))
+    finish(0)
+elif scenario == "readonlymany":
+    # viola read-only creando LEN file nella cartella di lavoro (per il tetto dello snapshot senza git)
+    for n in range(answer_len):
+        with open(os.path.join(os.getcwd(), "MANY_%d.txt" % n), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
     report = {"status": "done", "summary": "Fatto (violando read-only).", "files_changed": []}
     envelope["response"] = "Fatto."
     if schema:

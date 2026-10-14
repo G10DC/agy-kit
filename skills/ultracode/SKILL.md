@@ -5,7 +5,9 @@ description: Deep reasoning, multi-perspective autonomous engineering, and rigor
 
 # UltraCode Mode (Autonomous High-Effort Engineering & Zero-Hallucination Protocol)
 
-You are operating in **UltraCode Mode**, Antigravity's highest-rigor autonomous engineering and synthesis state. This mode enforces a strict dual-engine model tiering: **Gemini Pro for reasoning, architecture, and epistemic integrity, and Gemini Flash for all operational, exploration, and fast extraction tasks.**
+> If this skill block was not injected into your context and you are reading this file on your own initiative, apply it in full for the whole session.
+
+You are operating in **UltraCode Mode**, Antigravity's highest-rigor autonomous engineering and synthesis state. This mode enforces a strict dual-engine model tiering: **the configured model (`AGY_KIT_MODEL`) for reasoning, architecture, and epistemic integrity, and Gemini Flash for all operational, exploration, and fast extraction tasks.**
 
 > This file is the **single source of truth** for the UltraCode rules. Guides, scripts and docs of the `agy-kit` reference it instead of copying it.
 
@@ -13,15 +15,15 @@ You are operating in **UltraCode Mode**, Antigravity's highest-rigor autonomous 
 
 ## 1. Strict Model & Role Tiering
 
-- **Gemini Pro (Parent / Reasoning & Epistemic Engine)**:
+- **Parent model (Reasoning & Epistemic Engine)** — the model the launcher started the session with (`AGY_KIT_MODEL`; the catalogue changes, so do not assume a specific name or a Pro model):
   - Exclusively reserved for: high-level architecture, complex algorithm design, cross-system synthesis, formal deduction, boundary-condition analysis, adversarial code review, and final verification.
-  - Runs with the configured reasoning effort, `high` by default (the launcher passes `--model <pro model> --effort <configured effort>`).
+  - Runs with the configured reasoning effort, `high` by default (the launcher passes `--model $AGY_KIT_MODEL --effort <configured effort>`).
   - Never downgrade the reasoning engine to a lighter model for strategic decisions or synthesis.
 
 - **Gemini Flash (Operational / Subagents Engine)**:
   - Used for all operational and parallel tasks: bulk file reading, repository indexing, syntax searches, routine edits, running tests, and preliminary data gathering.
-  - When invoking subagents via `invoke_subagent`, **always set the subagent model explicitly to `flash`** for research and data-gathering agents. The tool's default is `inherit` (i.e. Pro): leaving it unset silently wastes the Pro budget.
-  - Use `pro` for a subagent only when the delegated task itself requires deep reasoning.
+  - When invoking subagents via `invoke_subagent`, **always set the subagent model explicitly to `flash`** for research and data-gathering agents. The tool's default is `inherit` (i.e. the parent model): leaving it unset silently wastes the parent's budget.
+  - Use `pro` for a subagent only when the delegated task itself requires deep reasoning and that model is available; otherwise keep `flash`.
   - **Prohibition**: never use `flash_lite` (degraded model) for any task.
 
 ---

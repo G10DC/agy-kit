@@ -26,7 +26,10 @@ riproduzione dell'audit c1..c15):
                 "analizzati integralmente", caso «A» ... «B» corretto
   E-HASH/W-HASH ignorati nel codice (anche recintato), file nominato tra backtick/link/cella di
                 tabella deve corrispondere, hash senza nome che non combacia è solo avviso
-  W-FENCE       recinzione non chiusa
+  E-FENCE       recinzione non chiusa: errore, e il resto del documento viene comunque analizzato
+  W-100         dichiarazione di completezza senza punti [VERIFICARE] aperti (codice distinto da E-100)
+  W-QUOTE       numeri tra virgolette/grassetto assenti dalle righe citate (±1)
+  E-HASH testo  hash accanto a un nome di file in testo semplice (con estensione o percorso)
   E-LINK        fuori radice, al compendio stesso, schema/URI e "//host" ignorati
   E-CIT/E-LINK  fuori radice o al compendio stesso
   W-PATH        percorsi assoluti in backtick inesistenti
@@ -417,7 +420,7 @@ def test_100_left_boundary_excludes_1100():
     write(os.path.join(T, "c.md"), "Vedi [fonte.txt#L1].\nCrescita del 1100%.\n[VERIFICARE] aperto\n")
     rc, f, _ = run_verify(os.path.join(T, "c.md"))
     check("E-100: '1100%' non è '100%' con confine sinistro",
-          not has(f, "ERROR", "E-100") and not has(f, "WARN", "E-100"), only_codes(f))
+          not has(f, "ERROR", "E-100") and not has(f, "WARN", "W-100"), only_codes(f))
     shutil.rmtree(T, ignore_errors=True)
 
 
@@ -432,7 +435,8 @@ def test_100_headings_and_code_blocks_excluded_from_open_points():
     rc, f, _ = run_verify(os.path.join(T, "c.md"))
     check("E-100: intestazioni e blocchi di codice non contano come punti [VERIFICARE] aperti "
           "(dichiarazione senza punti aperti -> solo avviso, non errore)",
-          not has(f, "ERROR", "E-100") and has(f, "WARN", "E-100"), only_codes(f))
+          not has(f, "ERROR", "E-100") and has(f, "WARN", "W-100") and not has(f, "WARN", "E-100"),
+          only_codes(f))
     shutil.rmtree(T, ignore_errors=True)
 
 
@@ -550,15 +554,107 @@ def test_hash_unnamed_match_is_silent():
 
 # ---------- COMP-9: recinzione non chiusa ----------
 
-def test_unclosed_fence_warns_and_masks_rest():
+def test_unclosed_fence_is_error_and_rest_is_checked():
     T = tmpdir()
     write(os.path.join(T, "a.txt"), "1\n")
+    h = hashlib.sha256(b"altro").hexdigest()
     write(os.path.join(T, "c.md"),
-          "Prima della recinzione [a.txt#L1].\n```\n[manca.txt#L9]\n[VERIFICARE] aperto\n")
+          "Prima della recinzione [a.txt#L1].\n```\n[manca.txt#L9]\n`a.txt` " + h + "\n")
     rc, f, _ = run_verify(os.path.join(T, "c.md"))
-    check("W-FENCE: recinzione non chiusa segnalata e resto del file non genera altri errori",
-          rc == 0 and has(f, "WARN", "W-FENCE") and not any(x["severity"] == "ERROR" for x in f),
+    check("E-FENCE: recinzione non chiusa -> errore (exit 1) alla riga di apertura",
+          rc == 1 and any(x["code"] == "E-FENCE" and x["severity"] == "ERROR" and x["line"] == 2 for x in f)
+          and not has(f, "WARN", "W-FENCE"), only_codes(f))
+    check("E-FENCE: il testo dopo l'apertura viene comunque analizzato (citazione e hash falsi rilevati)",
+          has(f, "ERROR", "E-CIT", "manca.txt") and has(f, "ERROR", "E-HASH"), only_codes(f))
+    write(os.path.join(T, "ok.md"), "Vedi [a.txt#L1].\n```\ncodice\n```\n")
+    rc, f, _ = run_verify(os.path.join(T, "ok.md"))
+    check("E-FENCE: recinzione chiusa -> nessun E-FENCE", rc == 0 and not has(f, "ERROR", "E-FENCE"),
           only_codes(f))
+    write(os.path.join(T, "inl.md"), "```python x = 1``` è un esempio [a.txt#L1].\n")
+    rc, f, _ = run_verify(os.path.join(T, "inl.md"))
+    check("E-FENCE: riga che comincia con uno span inline a tre backtick -> non è una recinzione, exit 0",
+          rc == 0 and not has(f, "ERROR", "E-FENCE"), only_codes(f))
+    write(os.path.join(T, "info.md"), "Vedi [a.txt#L1].\n```python title=x\ncodice\n")
+    rc, f, _ = run_verify(os.path.join(T, "info.md"))
+    check("E-FENCE: recinzione con info string senza backtick, non chiusa -> E-FENCE alla riga 2",
+          rc == 1 and any(x["code"] == "E-FENCE" and x["line"] == 2 for x in f), only_codes(f))
+    write(os.path.join(T, "tilde.md"), "Vedi [a.txt#L1].\n~~~\ncodice\n")
+    rc, f, _ = run_verify(os.path.join(T, "tilde.md"))
+    check("E-FENCE: recinzione a tilde non chiusa -> E-FENCE", rc == 1 and has(f, "ERROR", "E-FENCE"), only_codes(f))
+    shutil.rmtree(T, ignore_errors=True)
+
+
+def test_hash_plain_text_name():
+    T = tmpdir()
+    p = os.path.join(T, "contratto.txt")
+    write(p, "14 giorni\n")
+    real = sha256_of(p)
+    fake = hashlib.sha256(b"inventato").hexdigest()
+    write(os.path.join(T, "c.md"), f"Il file contratto.txt ha SHA-256 {fake}.\n")
+    rc, f, _ = run_verify(os.path.join(T, "c.md"))
+    check("E-HASH: hash falso accanto a un nome in testo semplice -> errore, exit 1",
+          rc == 1 and has(f, "ERROR", "E-HASH") and not has(f, "WARN", "W-HASH"), only_codes(f))
+    write(os.path.join(T, "c.md"), f"Il file contratto.txt ha SHA-256 {real}.\n")
+    rc, f, _ = run_verify(os.path.join(T, "c.md"))
+    check("E-HASH: hash corretto accanto a un nome in testo semplice -> nessun errore",
+          rc == 0 and not has(f, "ERROR", "E-HASH"), only_codes(f))
+    write(os.path.join(T, "sub", "dati.csv"), "x\n")
+    write(os.path.join(T, "c.md"), f"Vedi sub/dati.csv: {fake}\n")
+    rc, f, _ = run_verify(os.path.join(T, "c.md"))
+    check("E-HASH: percorso relativo in testo semplice riconosciuto", has(f, "ERROR", "E-HASH"), only_codes(f))
+    shutil.rmtree(T, ignore_errors=True)
+
+
+def test_hash_plain_text_no_false_positive_on_common_words():
+    T = tmpdir()
+    write(os.path.join(T, "contratto"), "x\n")  # file senza estensione: la parola comune non conta
+    fake = hashlib.sha256(b"inventato").hexdigest()
+    write(os.path.join(T, "c.md"), f"Il contratto è firmato. Impronta isolata: {fake}\n")
+    rc, f, _ = run_verify(os.path.join(T, "c.md"))
+    check("E-HASH: parola comune uguale a un file senza estensione -> solo W-HASH, exit 0",
+          rc == 0 and has(f, "WARN", "W-HASH") and not has(f, "ERROR", "E-HASH"), only_codes(f))
+    shutil.rmtree(T, ignore_errors=True)
+
+
+def test_quote_number_not_in_cited_line():
+    T = tmpdir()
+    write(os.path.join(T, "contratto.txt"), "Termine di recesso: 14 giorni\nfine\n")
+    write(os.path.join(T, "c.md"),
+          "Il recesso è di **30 giorni** [contratto.txt#L1].\n"
+          "Il recesso è di \"14 giorni\" [contratto.txt#L1].\n"
+          "Il recesso è di «1.4» o «14» [contratto.txt#L1].\n"
+          "Nessun numero tra virgolette: 30 giorni [contratto.txt#L1].\n"
+          "**1. Titolo** [contratto.txt#L1].\n"
+          "Il recesso è di «14 giorni» [contratto.txt#L2].\n"
+          "Il recesso è di «30 giorni» [contratto.txt#L2].\n")
+    rc, f, _ = run_verify(os.path.join(T, "c.md"))
+    q = sorted(x["line"] for x in f if x["code"] == "W-QUOTE")
+    check("W-QUOTE: numero in grassetto assente dalla riga citata -> avviso (exit 0); presente, "
+          "senza virgolette, marcatore d'elenco, riga ±1: nessun avviso; «30» vs riga 2 (±1 = riga 1 con 14) -> avviso",
+          rc == 0 and q == [1, 7] and all(x["severity"] == "WARN" for x in f if x["code"] == "W-QUOTE"),
+          (q, only_codes(f)))
+    write(os.path.join(T, "d.md"),
+          "**Art. 7** — «il termine è di quattordici giorni» [contratto.txt#L1].\n"
+          "**Punto 3)** il recesso è libero [contratto.txt#L1].\n"
+          "**Articolo 12-bis** e **comma 2** [contratto.txt#L1].\n"
+          "**Art. 7**: il recesso è di **30 giorni** [contratto.txt#L1].\n"
+          "**30 giorni** [contratto.txt#L1].\n")
+    rc, f, _ = run_verify(os.path.join(T, "d.md"))
+    q = sorted(x["line"] for x in f if x["code"] == "W-QUOTE")
+    check("W-QUOTE: etichette in grassetto (Art. N, Punto N), senza altri numeri, non danno avviso; "
+          "un dato in grassetto assente (**30 giorni**) lo dà ancora, anche accanto a un'etichetta",
+          rc == 0 and q == [4, 5], (q, only_codes(f)))
+    shutil.rmtree(T, ignore_errors=True)
+
+
+def test_quote_skips_unverifiable_citations():
+    T = tmpdir()
+    write(os.path.join(T, "a.txt"), "14\n")
+    write(os.path.join(T, "b.pdf"), b"%PDF-1.4\n")
+    write(os.path.join(T, "c.md"), "Dato «30» [a.txt#L1; b.pdf p.1]. Dato «30» [a.txt#L99].\n")
+    rc, f, _ = run_verify(os.path.join(T, "c.md"))
+    check("W-QUOTE: se una citazione della riga non è verificabile (pdf, fuori range) la riga è saltata",
+          not has(f, "WARN", "W-QUOTE"), only_codes(f))
     shutil.rmtree(T, ignore_errors=True)
 
 

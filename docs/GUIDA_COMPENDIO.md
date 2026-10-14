@@ -8,11 +8,11 @@
 
 ## 1. Cosa fa
 
-1. Si sposta nella cartella da analizzare e avvia UltraCode (`/ultracode` + modello Pro con l'effort configurato, default `high`; con `AGY_KIT_SANDBOX=1` nel config gira con `agy --sandbox`, consigliato su documenti di provenienza esterna).
+1. Si sposta nella cartella da analizzare e avvia UltraCode (`/ultracode` + il modello configurato in `AGY_KIT_MODEL` con l'effort configurato, default `high`; con `AGY_KIT_SANDBOX=1` nel config gira con `agy --sandbox`, consigliato su documenti di provenienza esterna).
 2. Chiede all'agente di:
    - censire l'albero dei file con un comando reale;
    - delegare lettura ed estrazione verbatim a sotto-agenti **Flash**;
-   - tenere per il modello Pro sintesi, collegamenti e deduzioni;
+   - tenere per il modello principale sintesi, collegamenti e deduzioni;
    - **non aprire né trascrivere i file che possono contenere segreti** (`.env` e varianti, chiavi private, tutto ciò che sta in `.ssh/`, `.aws/`, `.gnupg/`, credenziali di gestori password, ecc.): citarli solo per nome nell'inventario, con la nota `[ESCLUSO: possibile segreto]`; se trova un segreto dentro un altro file, scrivere `[SEGRETO OMESSO]` invece del valore.
 3. Il file prodotto contiene:
    - indice e scheda rapida;
@@ -69,8 +69,9 @@ Errori (fanno fallire la verifica, exit 1):
 |---|---|
 | `E-LINK` | Link Markdown o `file://` verso file inesistenti, fuori dalla radice (`--root`) o al compendio stesso |
 | `E-CIT` | Citazioni `[file#L12]`, `[file#L12-L20]` o `[doc.pdf p.N]` verso file/sigle inesistenti, fuori dalla radice, al compendio stesso, o righe/pagine fuori intervallo. Le sigle vengono lette dalle tabelle di legenda del documento (`\| **SIGLA** \| \`file\` \|`) |
-| `E-HASH` | SHA-256 dichiarato accanto a un file nominato (tra backtick, in un link Markdown o in una cella di tabella) che non corrisponde al file indicato |
+| `E-HASH` | SHA-256 dichiarato accanto a un file nominato (tra backtick, in un link Markdown, in una cella di tabella o in testo semplice se il nome ha un'estensione o un separatore di percorso ed esiste sotto `--root`) che non corrisponde al file indicato |
 | `E-100` | "100%" / "INTEGRALE" / "copertura totale" dichiarati mentre ci sono punti `[VERIFICARE]` ancora aperti nel documento |
+| `E-FENCE` | Una recinzione di codice (tripla virgoletta inversa o `~~~`) aperta non viene mai chiusa, segnalata alla riga di apertura: la verifica è incompleta. Solo la riga di apertura è trattata come codice, il resto del documento viene analizzato come prosa (possibili errori spuri: chiudi la recinzione) |
 | `E-COV` | Solo con `--require-coverage`: file delle fonti sotto `--root` mai citati nel compendio, oppure compendio vuoto o senza alcuna citazione |
 
 Avvisi (non fanno fallire la verifica):
@@ -84,10 +85,11 @@ Avvisi (non fanno fallire la verifica):
 | `W-AMBIG` | Citazione o nome per solo basename che combacia con più file sotto la radice: valida se lo è per almeno uno dei candidati, ma segnalata perché ambigua |
 | `W-BIN` | Citazione a righe (`#Lnn`) su un file binario/documentale non verificabile contando le righe, oppure pagina PDF non verificabile perché `pdfinfo`/`pdftotext` non sono disponibili |
 | `W-HASH` | SHA-256 senza alcun file nominato sulla riga che non corrisponde a nessun file sotto la radice (non è un errore: potrebbe essere un hash citato verbatim da una fonte, es. `FROM immagine@sha256:...`, checksum di un lockfile) |
-| `W-FENCE` | Una recinzione di codice (tripla virgoletta inversa o `~~~`) aperta non viene mai chiusa: il testo restante nel file è escluso dai controlli (scelta conservativa: trattato come codice, non come prosa, ma la mancata chiusura viene sempre segnalata) |
+| `W-100` | "100%" / "INTEGRALE" dichiarati senza punti `[VERIFICARE]` aperti: da verificare a mano che la copertura sia davvero totale (con punti aperti è l'errore `E-100`) |
+| `W-QUOTE` | Riga con una citazione a righe (`#Lnn`) di un file di testo e numeri tra virgolette («», “”, ") o in grassetto, nessuno dei quali compare nelle righe citate (±1): la citazione esiste ma potrebbe non sostenere il dato. Euristica: salta le righe con citazioni non verificabili (pagine PDF, binari) e non vede i numeri scritti in lettere |
 | `W-CIT` | Etichetta tra parentesi quadre con `#Lnn` che non è né una sigla di legenda né un file esistente, in un documento senza alcuna legenda (con una legenda, lo stesso caso è `E-CIT`) |
 
-Il codice non viene analizzato: blocchi recintati e testo tra backtick sono esclusi da citazioni e completezza.
+Il codice non viene analizzato: blocchi recintati (chiusi) e testo tra backtick sono esclusi da citazioni e completezza.
 
 `--require-coverage` (usata automaticamente da `compendio` a fine sessione) alza `W-COV` a `E-COV`: ogni file sotto `--root` deve comparire nel compendio per nome o percorso relativo, oppure dentro una nota `[ESCLUSO: ... nome-file ...]` per i file esclusi come possibili segreti.
 
@@ -95,6 +97,6 @@ Il codice non viene analizzato: blocchi recintati e testo tra backtick sono escl
 
 ### Cosa garantisce e cosa no
 
-`compendio-verify` è un controllo **di forma e di tracciabilità**, non di verità. Verifica che link, citazioni e hash puntino davvero a un file esistente sotto la radice indicata, con righe o pagine nell'intervallo giusto e un hash che corrisponde, e che ogni file delle fonti sia stato almeno nominato. **Non legge il contenuto citato per giudicare se il compendio lo riporta fedelmente**: una citazione `[file.py#L10]` sintatticamente corretta, ma che descrive male cosa dice davvero la riga 10, supera comunque la verifica. Il controllo è una rete contro le allucinazioni più grossolane — fonte inventata, riga inesistente, hash sbagliato, dichiarazione di completezza falsa — non una garanzia che il testo sia accurato.
+`compendio-verify` è un controllo **di forma e di tracciabilità**, non di verità. Verifica che link, citazioni e hash puntino davvero a un file esistente sotto la radice indicata, con righe o pagine nell'intervallo giusto e un hash che corrisponde, e che ogni file delle fonti sia stato almeno nominato. **Non giudica se il compendio riporta fedelmente il contenuto citato**: una citazione `[file.py#L10]` sintatticamente corretta, ma che descrive male cosa dice davvero la riga 10, supera la verifica. Il solo controllo sul contenuto è `W-QUOTE`, un avviso euristico limitato ai numeri tra virgolette o in grassetto. Il controllo è una rete contro le allucinazioni più grossolane — fonte inventata, riga inesistente, hash sbagliato, dichiarazione di completezza falsa — non una garanzia che il testo sia accurato.
 
-**Collaudo.** La suite `tests/test_compendio_verify.py` (55 casi su questa macchina) copre ogni codice con documenti minimi costruiti per il test, inclusi gli scenari `W-AMBIG`/`W-BIN`/`W-HASH`/`W-FENCE`/`W-CIT` e le pagine PDF. Una versione precedente di questa guida citava un "collaudo sul caso reale Esselunga" (`Esselunga/COMPENDIO_INTEGRALE.md`, `BASE_CONOSCENZA_ESSELUNGA.md`): quei file **non sono inclusi nel kit**, e quell'affermazione non è verificabile da chi lo riceve.
+**Collaudo.** La suite `tests/test_compendio_verify.py` (64 controlli) copre ogni codice con documenti minimi costruiti per il test, inclusi gli scenari `W-AMBIG`/`W-BIN`/`W-HASH`/`E-FENCE`/`W-100`/`W-QUOTE`/`W-CIT`, l'hash accanto a un nome in testo semplice e le pagine PDF. Si lancia con `tests/run-tests.sh` (o direttamente `python tests/test_compendio_verify.py`); sotto `pytest` un `conftest.py` esclude i due file della suite Python, che non usano `assert`. Una versione precedente di questa guida citava un "collaudo sul caso reale Esselunga" (`Esselunga/COMPENDIO_INTEGRALE.md`, `BASE_CONOSCENZA_ESSELUNGA.md`): quei file **non sono inclusi nel kit**, e quell'affermazione non è verificabile da chi lo riceve.

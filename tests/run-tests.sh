@@ -28,7 +28,9 @@ EOF
 chmod +x "$T/agy"
 export AGY_BIN="$T/agy" STUB_ARGS="$T/args" AGY_KIT_CONFIG="$T/none"
 export AGY_KIT_MODEL=test-model AGY_KIT_EFFORT=high AGY_KIT_SKIP_PERMISSIONS=1
-unset AGY_KIT_SANDBOX AGY_KIT_PLAIN_SKIP_PERMISSIONS AGY_KIT_BASH CLAUDE_CODE_SUBAGENT_MODEL
+unset AGY_KIT_SANDBOX AGY_KIT_PLAIN_SKIP_PERMISSIONS AGY_KIT_BASH CLAUDE_CODE_SUBAGENT_MODEL AGY_KIT_POLICY AGY_KIT_CHECK_MODEL
+# SKILL.md installata finta: in -i il prompt chiede di leggerla (percorso noto da SKILLS_DIR)
+export AGY_KIT_SKILLS_DIR="$T/skills"; mkdir -p "$T/skills/ultracode"; printf '# UltraCode Mode\n' > "$T/skills/ultracode/SKILL.md"
 args() { tr '\n' '|' < "$T/args"; }
 uc() { : > "$T/args"; "$BASH_BIN" "$KIT/bin/agy-ultracode" "$@" </dev/null; }
 
@@ -41,11 +43,16 @@ fi
 
 echo "agy-ultracode ($("$BASH_BIN" --version | head -1 | cut -c1-40))"
 B="--model|test-model|--effort|high|--dangerously-skip-permissions|"
-S="/ultracode Sessione UltraCode attiva. Attendi il mio primo task."
+S="Sessione UltraCode attiva. Attendi il mio primo task."
+# prefisso dei prompt -i: /ultracode + richiesta esplicita di leggere SKILL.md (due righe), riga vuota, task
+IPH0="/ultracode Prima di qualunque altra azione leggi per intero, con lo strumento di lettura file, la skill UltraCode: $(natp "$T/skills/ultracode/SKILL.md")|Applicane le regole per tutta la sessione; solo dopo procedi con quanto segue."
+# terza riga: la cartella di lavoro esplicita (prova reale 14/10: senza, il modello lavorava in ~/.gemini)
+iph_wd() { printf '%s|Cartella di lavoro: %s (file, comandi e ricerche partono da qui, non dalla cartella della skill).' "$IPH0" "$(natp "$1")"; }
+IPH="$(iph_wd "$PWD")"
 uc >/dev/null
-expect "senza argomenti → -i con /ultracode" "$B-i|$S|" "$(args)"
+expect "senza argomenti → -i con lettura di SKILL.md e messaggio di sessione" "$B-i|$IPH||$S|" "$(args)"
 uc risolvi il bug
-expect "prompt libero → -i '/ultracode <prompt>'" "$B-i|/ultracode risolvi il bug|" "$(args)"
+expect "prompt libero → -i con lettura di SKILL.md e poi il task (6.2)" "$B-i|$IPH||risolvi il bug|" "$(args)"
 uc -p "audit sicurezza"
 expect "-p → prompt prefissato con /ultracode (V06)" "$B-p|/ultracode audit sicurezza|" "$(args)"
 uc -p "/ultracode già"
@@ -57,15 +64,19 @@ expect "-c + task → -c -i '/ultracode task'" "$B-c|-i|/ultracode fix the bug|"
 uc "fix the bug" -c
 expect "task prima dei flag → stesso risultato" "$B-c|-i|/ultracode fix the bug|" "$(args)"
 uc --mode plan "progetta"
-expect "--mode <valore> + task" "$B--mode|plan|-i|/ultracode progetta|" "$(args)"
+expect "--mode <valore> + task" "$B--mode|plan|-i|$IPH||progetta|" "$(args)"
 uc --add-dir "$T/lib" "allinea le API"
-expect "--add-dir <dir> + task (percorso nativo)" "$B--add-dir|$(natp "$T/lib")|-i|/ultracode allinea le API|" "$(args)"
+expect "--add-dir <dir> + task (percorso nativo)" "$B--add-dir|$(natp "$T/lib")|-i|$IPH||allinea le API|" "$(args)"
 uc --conversation abc-123
 expect "--conversation senza task → -i /ultracode (BL-6)" "$B--conversation|abc-123|-i|/ultracode|" "$(args)"
+uc --conversation=abc -i "continua"
+expect "--conversation=<id> -i task → riprende, niente nuova richiesta di leggere SKILL.md" "$B--conversation=abc|-i|/ultracode continua|" "$(args)"
+uc --conversation=abc
+expect "--conversation=<id> senza task → -i /ultracode" "$B--conversation=abc|-i|/ultracode|" "$(args)"
 uc -i "refactor X"
-expect "-i <task> → prefissato" "$B-i|/ultracode refactor X|" "$(args)"
+expect "-i <task> → prefissato" "$B-i|$IPH||refactor X|" "$(args)"
 uc --prompt-interactive "refactor X"
-expect "--prompt-interactive <task> → prefissato" "$B--prompt-interactive|/ultracode refactor X|" "$(args)"
+expect "--prompt-interactive <task> → prefissato" "$B--prompt-interactive|$IPH||refactor X|" "$(args)"
 uc -i -c
 expect "-i senza valore seguito da -c → riprende, solo -i /ultracode (BL-6)" "$B-c|-i|/ultracode|" "$(args)"
 uc -p "-v non funziona"
@@ -79,10 +90,10 @@ expect "'/ultracodeX' non conta come prefisso" "$B-p|/ultracode /ultracodeX y|" 
 uc -p "  /ultracode y"
 expect "prefisso dopo spazi iniziali → nessun doppio prefisso" "$B-p|/ultracode y|" "$(args)"
 uc -- "-task"
-expect "-- → il resto è testo del task" "$B-i|/ultracode -task|" "$(args)"
+expect "-- → il resto è testo del task" "$B-i|$IPH||-task|" "$(args)"
 uc --model altro --effort=low "task"
 expect "--model/--effort dell'utente sostituiscono quelli del kit" \
-  "--model|altro|--effort|low|--dangerously-skip-permissions|-i|/ultracode task|" "$(args)"
+  "--model|altro|--effort|low|--dangerously-skip-permissions|-i|$IPH||task|" "$(args)"
 uc --json-schema '{"type":"object"}' --log-file "$T/agy.log" -p x
 expect "--json-schema JSON invariato, --log-file nativo" \
   "$B--json-schema|{\"type\":\"object\"}|--log-file|$(natp "$T/agy.log")|-p|/ultracode x|" "$(args)"
@@ -130,6 +141,60 @@ AGY_BIN="$T/nonexistent" uc -p x 2>/dev/null
 expect "agy mancante → exit 127" "127" "$?"
 "$BASH_BIN" "$KIT/bin/agy-ultracode" -h | grep -q -- '--model M'; expect "-h documenta i nuovi usi" "0" "$?"
 
+echo "agy-ultracode: skill in -i e controllo del modello (audit 6.1, 6.2)"
+uc -i "/ultracode già"
+expect "-i con /ultracode già presente → un solo prefisso, poi lettura di SKILL.md e task" "$B-i|$IPH||già|" "$(args)"
+uc -i "/ultracode"
+expect "-i con il solo /ultracode → lettura di SKILL.md senza task" "$B-i|$IPH|" "$(args)"
+AGY_KIT_SKILLS_DIR="$T/noskills" uc "x"
+expect "SKILL.md installata assente → ripiego sulla copia del kit" \
+  "$B-i|${IPH/"$(natp "$T/skills/ultracode/SKILL.md")"/"$(natp "$KIT/skills/ultracode/SKILL.md")"}||x|" "$(args)"
+mkdir -p "$T/fakekit"; printf 'AGY_KIT_SKILLS_DIR=%q\n' "$T/altre" > "$T/fakekit/.install-paths"
+mkdir -p "$T/altre/ultracode"; : > "$T/altre/ultracode/SKILL.md"
+res="$( . "$KIT/lib/common.sh"; unset AGY_KIT_SKILLS_DIR; agy_kit_skill_file "$T/fakekit" )"
+expect "percorso della skill da .install-paths (SKILLS_DIR personalizzata)" "$(natp "$T/altre/ultracode/SKILL.md")" "$res"
+uc -p "x"
+expect "-p resta col solo prefisso /ultracode (la skill è già espansa da agy)" "$B-p|/ultracode x|" "$(args)"
+
+# stub di agy con `agy models` (elenco reale del 14/10, intestazione compresa); marcatore se viene chiamato
+cat > "$T/agym" <<'EOS'
+#!/usr/bin/env bash
+if [ "${1:-}" = models ]; then
+  : > "$STUB_MODELS_CALLED"
+  [ -n "${STUB_MODELS_SLEEP:-}" ] && exec sleep "$STUB_MODELS_SLEEP"
+  [ -n "${STUB_MODELS_EMPTY:-}" ] && exit 1
+  printf 'Fetching available models...\n'
+  printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
+  printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\nclaude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n'
+  printf 'claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\ngpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n'
+  exit 0
+fi
+: > "$STUB_ARGS"; for a in "$@"; do printf '%s\n' "$a" >> "$STUB_ARGS"; done
+EOS
+chmod +x "$T/agym"
+export STUB_MODELS_CALLED="$T/models-called"
+ucm() { rm -f "$STUB_MODELS_CALLED"; : > "$T/args"; AGY_BIN="$T/agym" "$BASH_BIN" "$KIT/bin/agy-ultracode" "$@" </dev/null 2>"$T/err"; }
+ucm x
+expect "-i: nessun 'agy models' di default (costa qualche secondo)" "no" "$([ -e "$STUB_MODELS_CALLED" ] && echo sì || echo no)"
+AGY_KIT_CHECK_MODEL=1 AGY_KIT_MODEL=gemini-3.8-flash ucm x
+expect "AGY_KIT_CHECK_MODEL=1: modello con effort (ID senza suffisso) presente → nessun avviso" \
+  "sì 0" "$([ -e "$STUB_MODELS_CALLED" ] && echo sì || echo no) $(wc -c < "$T/err" | tr -d ' ')"
+AGY_KIT_CHECK_MODEL=1 AGY_KIT_MODEL=gemini-3.1-pro ucm x; rc=$?
+expect "AGY_KIT_CHECK_MODEL=1: modello assente → avviso con elenco, ma il launcher parte" "0 1 1 1" \
+  "$rc $(grep -c 'non risulta in `agy models`' "$T/err") $(grep -c 'gemini-3.8-flash-high' "$T/err") $(grep -c -- '-i|' <<<"$(args)")"
+AGY_KIT_CHECK_MODEL=1 AGY_KIT_MODEL=gemini-3.8-flash AGY_KIT_EFFORT= ucm x
+expect "AGY_KIT_CHECK_MODEL=1: senza effort serve l'ID esatto → avviso" "1" "$(grep -c 'non risulta' "$T/err")"
+AGY_KIT_CHECK_MODEL=1 AGY_KIT_MODEL=gemini-3.8-flash-high AGY_KIT_EFFORT= ucm x
+expect "AGY_KIT_CHECK_MODEL=1: senza effort ID esatto presente → nessun avviso" "0" "$(wc -c < "$T/err" | tr -d ' ')"
+AGY_KIT_CHECK_MODEL=1 AGY_KIT_MODEL=sbagliato ucm -p x
+expect "AGY_KIT_CHECK_MODEL=1 con -p: nessun controllo (in -p l'errore di agy è già esplicito)" "no" "$([ -e "$STUB_MODELS_CALLED" ] && echo sì || echo no)"
+AGY_KIT_CHECK_MODEL=1 AGY_KIT_MODEL=sbagliato STUB_MODELS_EMPTY=1 ucm x; rc=$?
+expect "AGY_KIT_CHECK_MODEL=1: agy models senza risposta → silenzio e il launcher parte" "0 0" "$rc $(wc -c < "$T/err" | tr -d ' ')"
+t0=$SECONDS
+AGY_KIT_CHECK_MODEL=1 AGY_KIT_MODEL=sbagliato STUB_MODELS_SLEEP=20 AGY_KIT_MODELS_TIMEOUT=1 ucm x; rc=$?
+# AGY_KIT_MODELS_TIMEOUT=1: l'avvio non resta bloccato per i 20 s dello stub
+[ $((SECONDS - t0)) -lt 10 ]; expect "AGY_KIT_CHECK_MODEL=1: agy models che non risponde non blocca l'avvio (timeout)" "0 0" "$? $rc"
+
 echo "agy-compendio"
 mkdir -p "$T/src"; printf 'ciao\n' > "$T/src/a.txt"
 STUB_WRITE="$T/src/COMPENDIO_INTEGRALE.md" STUB_CONTENT=$'# ok\nVedi [a.txt#L1].\n' \
@@ -147,6 +212,13 @@ if [ $IS_WIN = 1 ]; then hash_cmd="Get-FileHash -Algorithm SHA256"
 elif [ "$(uname -s)" = Darwin ] || ! command -v sha256sum >/dev/null 2>&1; then hash_cmd="shasum -a 256"
 else hash_cmd="sha256sum"; fi
 grep -qF "$hash_cmd" "$T/args" && ok "comando hash della piattaforma ($hash_cmd)" || ko "comando hash" "$(grep -o 'SHA-256[^)]*' "$T/args")"
+mkdir -p "$T/srci"; printf 'ciao\n' > "$T/srci/a.txt"
+STUB_WRITE="$T/srci/COMPENDIO_INTEGRALE.md" STUB_CONTENT=$'# ok\nVedi [a.txt#L1].\n' \
+  "$BASH_BIN" "$KIT/bin/agy-compendio" --no-verify "$T/srci" >/dev/null; rc=$?
+expect "compendio in -i (default): exit 0" "0" "$rc"
+got="$(args)"
+expect "compendio in -i: -i, /ultracode + lettura di SKILL.md, cartella analizzata, poi il task (6.2)" "$B-i|$(iph_wd "$T/srci")||" "${got%%Modalità COMPENDIO*}"
+grep -q '^Modalità COMPENDIO\. Applica integralmente' "$T/args" && ok "compendio in -i: il task segue la richiesta di lettura" || ko "compendio in -i: task" "$(head -c 300 "$T/args")"
 STUB_WRITE="$T/out.md" STUB_CONTENT=$'x [a.txt#L9]\n' \
   "$BASH_BIN" "$KIT/bin/agy-compendio" -p -o "$T/out.md" "$T/src" >/dev/null; rc=$?
 expect "-o assoluto rispettato + citazione fuori range → exit 1 dal verificatore" "1" "$rc"
@@ -282,6 +354,34 @@ expect "policy.md: documenta 'mode: read-only'" "0" "$?"
 grep -qF "answer: { type: 'string' }" "$KIT/claude/policy.md"
 expect "policy.md: lo schema AG_REPORT include answer" "0" "$?"
 
+echo "ultra-ag: policy di instradamento (audit 6.6)"
+expect "policy di default: gemini-first → policy.md" "$(natp "$KIT/claude/policy.md")" "$(cargs 'a[a.index("--append-system-prompt-file")+1]')"
+AGY_KIT_POLICY=claude-first AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" >/dev/null; rc=$?
+expect "AGY_KIT_POLICY=claude-first → policy-claude-first.md" "0 $(natp "$KIT/claude/policy-claude-first.md")" \
+  "$rc $(cargs 'a[a.index("--append-system-prompt-file")+1]')"
+expect "claude-first: --agents senza 'Default subagent' né 'Sonnet or Haiku' (nessuna istruzione in contrasto con la policy)" "False" \
+  "$(cargs '"Default subagent" in a[a.index("--agents")+1] or "Sonnet or Haiku" in a[a.index("--agents")+1]')"
+grep -qiE "default (executor|subagent)" "$KIT/claude/agents.json"
+expect "agents.json: descrizione neutra (nessun 'default subagent/executor')" "1" "$?"
+printf 'AGY_KIT_POLICY=claude-first\n' > "$T/conf-policy"
+( unset AGY_KIT_POLICY; AGY_KIT_CONFIG="$T/conf-policy" AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" >/dev/null )
+expect "AGY_KIT_POLICY letta dal file di config" "$(natp "$KIT/claude/policy-claude-first.md")" "$(cargs 'a[a.index("--append-system-prompt-file")+1]')"
+rm -f "$STUB_CLAUDE_ARGS"
+out="$(AGY_KIT_POLICY=boh AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" 2>&1)"; rc=$?
+expect "AGY_KIT_POLICY sconosciuta → exit 2, messaggio chiaro, claude non avviato" "2 1 no" \
+  "$rc $(grep -c 'AGY_KIT_POLICY=boh non valido (valori ammessi: gemini-first, claude-first)' <<<"$out") $([ -e "$STUB_CLAUDE_ARGS" ] && echo sì || echo no)"
+P2="$KIT/claude/policy-claude-first.md"
+grep -qF "Antigravity is used only when the user asks" "$P2" && grep -q "model: 'haiku'" "$P2" && ! grep -q "default executor" "$P2"
+expect "policy claude-first: Opus/Haiku di default, Antigravity su richiesta" "0" "$?"
+grep -q 'mode: read-only' "$P2" && grep -qF "answer: { type: 'string' }" "$P2" && grep -q '^- `busy`' "$P2"
+expect "policy claude-first: mantiene read-only, schema AG_REPORT e gestione degli stati" "0" "$?"
+grep -q "Antigravity is the default executor\|default executor for every" "$KIT/claude/policy.md"
+expect "policy gemini-first: invariata (Antigravity esecutore predefinito)" "0" "$?"
+for pf in "$KIT/claude/policy.md" "$P2"; do
+  grep -q '^- `quota_exhausted`' "$pf" && grep -q 'quota_reset' "$pf" && grep -q 'unexpected_changes_check' "$pf" && grep -q '| quota_exhausted' "$pf"
+  expect "$(basename "$pf"): gestisce quota_exhausted, quota_reset e unexpected_changes_check" "0" "$?"
+done
+
 echo "Python e Windows"
 mkdir -p "$T/nopy" "$T/empty"
 for p in python3 python py; do printf '#!/bin/sh\necho "Python non è stato trovato"\nexit 49\n' > "$T/nopy/$p"; chmod +x "$T/nopy/$p"; done
@@ -333,9 +433,9 @@ if [ -n "$csc" ] && [ -x "$T/argv.exe" ]; then
   expect "MSYS_NO_PATHCONV assente dall'ambiente di agy (BL-2)" "1" "$?"
   unset STUB_NATIVE_ENV
   AGY_BIN="$T/argv.exe" "$BASH_BIN" "$KIT/bin/agy-ultracode" </dev/null
-  expect "agy.exe nativo riceve /ultracode intatto (sessione)" "$B-i|$S|" "$(nargs)"
+  expect "agy.exe nativo riceve /ultracode intatto (sessione)" "$B-i|${IPH//|/$'\n'}"$'\n\n'"$S|" "$(nargs)"
   AGY_BIN="$T/argv.exe" "$BASH_BIN" "$KIT/bin/agy-ultracode" --add-dir "$T/lib" risolvi </dev/null
-  expect "agy.exe nativo: --add-dir in forma Windows" "$B--add-dir|$(cygpath -w "$T/lib")|-i|/ultracode risolvi|" "$(nargs)"
+  expect "agy.exe nativo: --add-dir in forma Windows" "$B--add-dir|$(cygpath -w "$T/lib")|-i|${IPH//|/$'\n'}"$'\n\n'"risolvi|" "$(nargs)"
   printf 'x\n' > "$T/src/COMPENDIO_INTEGRALE.md"
   AGY_BIN="$T/argv.exe" "$BASH_BIN" "$KIT/bin/agy-compendio" -p --no-verify "$T/src" >/dev/null 2>&1
   tr '\0' '\n' < "$NA" | grep -q '^/ultracode Modalità COMPENDIO' \

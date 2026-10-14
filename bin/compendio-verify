@@ -8,10 +8,14 @@ Errori (fanno fallire la verifica, exit 1):
            compendio stesso
   E-CIT    citazioni [file#Lnn], [SIGLA#Lnn-Lmm] o [doc.pdf p.N] verso file/sigle inesistenti,
            fuori dalla radice, al compendio stesso, o righe/pagine fuori range
-  E-HASH   SHA-256 dichiarato accanto a un file nominato (tra backtick, in un link Markdown o
-           in una cella di tabella) che non corrisponde al file indicato
+  E-HASH   SHA-256 dichiarato accanto a un file nominato (tra backtick, in un link Markdown, in
+           una cella di tabella o in testo semplice se ha estensione o separatore di percorso)
+           che non corrisponde al file indicato
   E-100    dichiarazioni di completezza "100%" / "INTEGRALE" / "copertura totale" con punti
            [VERIFICARE] ancora aperti nel documento
+  E-FENCE  una recinzione ``` o ~~~ aperta non viene mai chiusa: il controllo del documento è
+           incompleto (il testo dopo l'apertura viene comunque analizzato come prosa, quindi
+           può produrre errori spurii: chiudere la recinzione)
   E-COV    con --require-coverage: file delle fonti sotto --root mai citati nel compendio, o
            compendio vuoto / senza alcuna citazione (senza l'opzione è l'avviso W-COV)
 
@@ -29,9 +33,11 @@ Avvisi (non fanno fallire la verifica):
   W-HASH   SHA-256 senza alcun file nominato sulla riga che non corrisponde a nessun file sotto
            la radice (non è un errore: potrebbe essere un hash citato verbatim da una fonte,
            es. FROM immagine@sha256:..., checksum di lockfile)
-  W-FENCE  una recinzione ``` o ~~~ aperta non viene mai chiusa: il testo restante nel file è
-           escluso dai controlli (scelta conservativa: viene trattato come codice, non come
-           prosa, ma la mancata chiusura viene sempre segnalata)
+  W-100    dichiarazione di completezza «100%» / «INTEGRALE» senza punti [VERIFICARE] aperti:
+           da verificare a mano (con punti aperti è l'errore E-100)
+  W-QUOTE  riga con citazione a righe (#Lnn) di un file di testo e numeri tra virgolette o in
+           grassetto, nessuno dei quali compare nelle righe citate (±1): la citazione esiste
+           ma potrebbe non sostenere il dato (euristica: numeri scritti in lettere non contano)
   W-CIT    etichetta tra parentesi quadre con #Lnn che non è né una sigla di legenda né un file
            esistente, in un documento senza alcuna legenda (con una legenda, lo stesso caso è
            E-CIT: vedi sopra)
@@ -91,6 +97,13 @@ RE_NORM = re.compile(r"(D\.?\s?P\.?\s?R\.?\s*(?:n\.?\s*)?\d+/\d{2,4}"
                      r"|Reg(?:olamento)?\.?\s*U\.?E\.?\s*\d+/\d{2,4}"
                      r"|Dir(?:ettiva)?\.?\s*U\.?E\.?\s*\d+/\d{2,4})",
                      re.IGNORECASE)
+RE_PLAIN_TOKEN = re.compile(r"[^\s|()\[\]<>`\"'«»“”,;]+")  # nome di file in testo semplice
+RE_CLAIM = re.compile(r"«[^»\n]*»|“[^”\n]*”|\"[^\"\n]*\"|\*\*[^*\n]+\*\*|__[^_\n]+__")
+RE_NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+RE_LIST_MARK = re.compile(r"^\W*\d+[.)]\s")
+# etichetta di riferimento ("**Art. 7**", "**Punto 3)**"): il numero identifica una parte, non è un dato citato
+RE_LABEL = re.compile(r"(?:art(?:icolo|t)?|comm[ai]|sezione|capo|titolo|punto|paragrafo|par|lett(?:era)?|§)\.?"
+                      r"\s*\d+[\w°º.,)\-]*", re.IGNORECASE)
 QUOTE_PAIRS = [("«", "»"), ("“", "”"), ('"', '"'), ("`", "`")]
 
 
@@ -123,6 +136,7 @@ class Verifier:
         self._pdf_pages = {}
         self._ambig_warned = set()
         self._corpus = None
+        self._src_lines = {}
         self.sigle = self._parse_sigle()
         self.prose = [RE_CODESPAN.sub(lambda m: " " * len(m.group(0)), ln) for ln in self.lines]
         self.code_mask = self._code_mask()
@@ -132,12 +146,15 @@ class Verifier:
         self.findings.append({"severity": sev, "code": code, "line": lineno, "message": msg})
 
     def _code_mask(self):
-        mask, fence = [], None
-        for ln in self.lines:
+        mask, fence, opened = [], None, 0
+        for idx, ln in enumerate(self.lines):
             s = ln.lstrip()
-            m = re.match(r"(`{3,}|~{3,})", s)
+            # CommonMark: l'info string di una recinzione a backtick non può contenere backtick
+            # (una riga che comincia con ```x``` è codice inline, non una recinzione)
+            m = re.match(r"(`{3,})(?![^`]*`)|(~{3,})", s)
             if fence is None and m:
-                fence = m.group(1)[0] * len(m.group(1))
+                fence = m.group(1) or m.group(2)
+                opened = idx
                 mask.append(True)
                 continue
             if fence is not None:
@@ -146,7 +163,11 @@ class Verifier:
                     fence = None
                 continue
             mask.append(False)
-        self.fence_unclosed = fence is not None
+        self.fence_unclosed = opened + 1 if fence is not None else 0  # riga (1-based) dell'apertura
+        if fence is not None:
+            # recinzione mai chiusa: solo la riga di apertura è codice, il resto va controllato
+            # comunque (E-FENCE dice che il documento è incompleto)
+            mask[opened + 1:] = [False] * (len(mask) - opened - 1)
         return mask
 
     def _parse_sigle(self):
@@ -484,6 +505,58 @@ class Verifier:
         else:
             self.add("ERROR", "E-CIT", i, f"fonte illeggibile per [{part}]")
 
+    def _lines_of(self, p):
+        if p not in self._src_lines:
+            try:
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    self._src_lines[p] = fh.read().split("\n")
+            except OSError:
+                self._src_lines[p] = None
+        return self._src_lines[p]
+
+    @staticmethod
+    def _numbers(text):
+        return {re.sub(r"[.,]", "", n) for n in RE_NUMBER.findall(text)}
+
+    def check_quotes(self):
+        """W-QUOTE: i numeri tra virgolette/grassetto di una riga con citazione a righe devono
+        comparire (almeno uno) nelle righe citate ±1. Se qualche citazione della riga non è
+        verificabile (pagina, binario, fuori range, non risolta) la riga viene saltata."""
+        for i, ln in enumerate(self.prose, 1):
+            if self.code_mask[i - 1] or not RE_CIT_BLOCK.search(ln):
+                continue
+            claims = set()
+            for c in RE_CLAIM.findall(RE_CIT_BLOCK.sub(" ", ln)):
+                text = c.strip("«»“”\"*_ ")
+                if RE_LABEL.fullmatch(text):
+                    continue
+                claims |= self._numbers(RE_LIST_MARK.sub("", text))
+            if not claims:
+                continue
+            found, checkable, cited = set(), True, []
+            for blk in RE_CIT_BLOCK.finditer(ln):
+                for part, ref, m, is_page in self._citation_parts(blk.group(1)):
+                    cands, status = self.resolve_all(ref)
+                    if is_page or status not in ("ok", "ambiguous"):
+                        checkable = False
+                        continue
+                    a = int(m.group(1))
+                    b = int(m.group(2)) if m.group(2) else a
+                    for t in cands:
+                        src = None if self.is_binary(t) else self._lines_of(t)
+                        if src is None or a < 1 or b < a or b > len(src):
+                            continue
+                        cited.append(part)
+                        found |= self._numbers("\n".join(src[max(a - 2, 0):b + 1]))
+                        break
+                    else:
+                        checkable = False
+            if checkable and cited and claims.isdisjoint(found):
+                self.add("WARN", "W-QUOTE", i,
+                         f"numeri {', '.join(sorted(claims))} tra virgolette/grassetto assenti dalle "
+                         f"righe citate (±1): {', '.join('[' + c + ']' for c in cited)}; "
+                         f"verificare che la citazione sostenga il dato")
+
     def named_files_on_line(self, ln, lineno):
         names = []
         for bt in RE_BACKTICK.findall(ln):
@@ -497,6 +570,12 @@ class Verifier:
                 cell = cell.strip().strip("`*_").strip()
                 if cell and not RE_SHA256.fullmatch(cell):
                     names.append(cell)
+        # nomi in testo semplice: solo token con estensione o separatore di percorso (le parole
+        # comuni non combaciano per caso); contano solo se esistono sotto la radice
+        for tok in RE_PLAIN_TOKEN.findall(RE_SHA256.sub(" ", ln)):
+            tok = tok.split("#", 1)[0].strip(".:!?*_")
+            if tok and ("/" in tok or "\\" in tok or re.search(r"[^.]\.[A-Za-z0-9]{1,8}$", tok)):
+                names.append(tok)
         resolved = []
         seen = set()
         for n in names:
@@ -585,7 +664,7 @@ class Verifier:
                          f"dichiarazione di completezza «{match_text}» con {open_points} punti "
                          f"[VERIFICARE] aperti")
             else:
-                self.add("WARN", "E-100", i, f"dichiarazione di completezza «{match_text}»: verificarla")
+                self.add("WARN", "W-100", i, f"dichiarazione di completezza «{match_text}»: verificarla")
 
     def check_deductions(self):
         for i, ln in enumerate(self.prose, 1):
@@ -622,9 +701,10 @@ class Verifier:
 
     def check_fence(self):
         if self.fence_unclosed:
-            self.add("WARN", "W-FENCE", len(self.lines),
-                     "recinzione ``` o ~~~ aperta e mai chiusa: il testo che segue è escluso dai "
-                     "controlli (comportamento conservativo); chiudi la recinzione per farlo verificare")
+            self.add("ERROR", "E-FENCE", self.fence_unclosed,
+                     "recinzione ``` o ~~~ aperta e mai chiusa: verifica incompleta, il testo che "
+                     "segue è stato analizzato come prosa (possibili errori spurii); chiudi la "
+                     "recinzione")
 
     def check_coverage(self, require):
         all_files = sorted({p for pl in self.index().values() for p in pl})
@@ -662,6 +742,7 @@ class Verifier:
     def run(self, require_coverage=False):
         self.check_links()
         self.check_citations()
+        self.check_quotes()
         self.check_hashes()
         self.check_completeness()
         self.check_deductions()

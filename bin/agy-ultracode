@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # agy-ultracode: avvia Antigravity (agy) in modalità UltraCode.
-#   - modello principale: $AGY_KIT_MODEL (default gemini-3.1-pro) con --effort high
+#   - modello principale: $AGY_KIT_MODEL (default gemini-3.8-flash) con --effort high
 #   - regole: skill globale `ultracode`, caricata con il comando /ultracode,
-#     che lo script mette sempre in testa al prompt (-p, -i o task libero)
+#     che lo script mette sempre in testa al prompt (-p, -i o task libero); in -i, dove agy
+#     non espande il comando, il prompt chiede anche di leggere SKILL.md prima di ogni azione
 #   - sotto-agenti Flash: prescritti dalla skill (invoke_subagent, model flash)
 # Uso:
 #   ultracode                       sessione interattiva
@@ -27,7 +28,7 @@ KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
 
 case "${1:-}" in
   -h|--help)
-    sed -n '3,15p' "$src" | sed 's/^# \{0,1\}//'
+    sed -n '3,16p' "$src" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 
@@ -133,7 +134,7 @@ resumes_conversation() {
   local x
   [ $nrest -eq 0 ] && return 1
   for x in "${rest[@]}"; do
-    case "$x" in -c|--continue|--conversation) return 0 ;; esac
+    case "$x" in -c|--continue|--conversation|--conversation=*) return 0 ;; esac
   done
   return 1
 }
@@ -168,10 +169,19 @@ esac
 
 agy_kit_base_flags
 if [ "$has_prompt" = true ]; then
+  case "$pflag" in
+    -i|--prompt-interactive)
+      # In -i agy non espande /ultracode: la lettura di SKILL.md va chiesta nel prompt. Se si
+      # riprende una conversazione la skill è già stata caricata nella sessione originale.
+      agy_kit_warn_model
+      if resumes_conversation; then prompt="$(agy_kit_skill_prefix "$prompt")"
+      else prompt="$(agy_kit_skill_prompt_interactive "$prompt" "$KIT_DIR")"; fi ;;
+    *) prompt="$(agy_kit_skill_prefix "$prompt")" ;;
+  esac
   if [ $nrest -gt 0 ]; then
-    agy_kit_exec_agy "${BASE_FLAGS[@]}" "${rest[@]}" "$pflag" "$(agy_kit_skill_prefix "$prompt")"
+    agy_kit_exec_agy "${BASE_FLAGS[@]}" "${rest[@]}" "$pflag" "$prompt"
   else
-    agy_kit_exec_agy "${BASE_FLAGS[@]}" "$pflag" "$(agy_kit_skill_prefix "$prompt")"
+    agy_kit_exec_agy "${BASE_FLAGS[@]}" "$pflag" "$prompt"
   fi
 elif [ $nrest -gt 0 ]; then
   agy_kit_exec_agy "${BASE_FLAGS[@]}" "${rest[@]}" "$pflag"
