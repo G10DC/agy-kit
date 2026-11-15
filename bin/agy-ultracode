@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # agy-ultracode: avvia Antigravity (agy) in modalità UltraCode.
-#   - modello principale: $AGY_KIT_MODEL (default gemini-3.8-flash) con --effort high
+#   - modello principale: $AGY_KIT_MODEL (default gemini-4-hydrogen) con --effort high
 #   - regole: skill globale `ultracode`, caricata con il comando /ultracode,
 #     che lo script mette sempre in testa al prompt (-p, -i o task libero); in -i, dove agy
 #     non espande il comando, il prompt chiede anche di leggere SKILL.md prima di ogni azione

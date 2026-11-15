@@ -354,7 +354,7 @@ expect "SHEL-6: uninstall.sh lanciato dalla copia installata (senza AGY_KIT_HOME
 [ -e "$CUSTOM_BIN/agy-kit" ]; expect "SHEL-6: i comandi in BIN_DIR personalizzata vengono rimossi" "1" "$?"
 
 # =============================================================================
-echo "12. doctor: python3 dello Store simulato → messaggio d'aiuto, non un falso ✔"
+echo "12. doctor: python3 non funzionante simulato → errore chiaro, non un falso ✔"
 sandbox
 install --no-skill >/dev/null 2>&1
 STOREBIN="$ROOT/storepy"; mkdir -p "$STOREBIN"
@@ -362,8 +362,13 @@ for p in python3 python; do
   printf '#!/bin/sh\necho "Python non e stato trovato"\nexit 49\n' > "$STOREBIN/$p"; chmod +x "$STOREBIN/$p"
 done
 out="$(PATH="$STOREBIN:$FAKEBIN:/usr/bin:/bin" "$BIN_DIR_D/agy-kit" doctor 2>&1)"
-printf '%s\n' "$out" | grep -qi 'alias di esecuzione'
-expect "PLAT-5: doctor spiega l'alias del Microsoft Store invece di un falso ✔" "0" "$?"
+if [ $IS_WIN = 1 ]; then
+  printf '%s\n' "$out" | grep -qi 'alias di esecuzione'
+  expect "PLAT-5: doctor spiega l'alias del Microsoft Store invece di un falso ✔" "0" "$?"
+else
+  printf '%s\n' "$out" | grep -q 'Python trovato ma non utilizzabile'
+  expect "PLAT-5: doctor segnala il Python rotto invece di un falso ✔" "0" "$?"
+fi
 
 # =============================================================================
 echo "13. doctor: il modello deve esistere in \`agy models\` (audit 6.1)"
@@ -437,8 +442,8 @@ expect "doctor: AGY_KIT_POLICY=claude-first riconosciuta" "0" "$?"
 out="$(env AGY_KIT_POLICY=claude-first "$BIN_DIR_D/agy-kit" config 2>&1)"
 printf '%s\n' "$out" | grep -qx 'AGY_KIT_POLICY=claude-first'
 expect "agy-kit config mostra AGY_KIT_POLICY" "0" "$?"
-grep -q '^AGY_KIT_MODEL=gemini-3.8-flash$' "$XDG_CONFIG_HOME/agy-kit/config"
-expect "config installata: default AGY_KIT_MODEL=gemini-3.8-flash (nessun Pro)" "0" "$?"
+grep -q '^AGY_KIT_MODEL=gemini-4-hydrogen$' "$XDG_CONFIG_HOME/agy-kit/config"
+expect "config installata: default AGY_KIT_MODEL=gemini-4-hydrogen" "0" "$?"
 
 echo
 echo "Esito: $pass superati, $fail falliti"

@@ -19,13 +19,13 @@ UltraCode è la modalità di Antigravity a massima intensità: ragionamento prof
 
 | Ruolo | Modello | Come viene imposto |
 |---|---|---|
-| Agente principale: architettura, sintesi, deduzioni, verifica | `AGY_KIT_MODEL` (default `gemini-3.8-flash`) con `AGY_KIT_EFFORT` (default `high`) | Flag della CLI, quindi in modo deterministico |
-| Sotto-agenti: scansione, lettura massiva, estrazione verbatim, test | Flash | La skill prescrive `invoke_subagent` con modello `flash`. Il default del tool è `inherit`, cioè il modello principale |
+| Agente principale: architettura, sintesi, deduzioni, verifica | `AGY_KIT_MODEL` (default `gemini-4-hydrogen`) con `AGY_KIT_EFFORT` (default `high`) | Flag della CLI, quindi in modo deterministico |
+| Sotto-agenti (solo oltre ~40k token da leggere, >3 task paralleli o audit avversariale): `research` (sola lettura in sandbox) o `self` (operativo) | Flash (`Model: "flash"`) | La skill prescrive `invoke_subagent` con modello `flash`. Il default del tool è `inherit`, cioè il modello principale |
 | Vietato | `flash_lite` | Regola della skill |
 
 Il modello dei sotto-agenti viene scelto dall'agente principale seguendo la skill: non esiste un flag della CLI che lo imponga.
 
-**Scegliere il modello.** La skill non dipende dal nome del modello: il "motore di ragionamento" è quello configurato in `AGY_KIT_MODEL`. Il catalogo cambia lato server (al 14/10/2026 `agy models` non elenca modelli Pro), quindi usa un ID presente in `agy models`. Con `--effort` (il default) l'ID va scritto **senza** il suffisso di sforzo (`gemini-3.8-flash`, non `gemini-3.8-flash-high`). Se l'ID non si risolve, in `-p` agy fallisce, mentre in `-i` ripiega **in silenzio** su Flash Medium. `agy-kit doctor` confronta `AGY_KIT_MODEL` con `agy models` (errore con l'elenco dei candidati se manca; solo un avviso se `agy models` non risponde); con `AGY_KIT_CHECK_MODEL=1` lo stesso controllo avvisa su stderr a ogni avvio in `-i` (spento di default: `agy models` interroga il server e aggiunge qualche secondo).
+**Scegliere il modello.** La skill non dipende dal nome del modello: il "motore di ragionamento" è quello configurato in `AGY_KIT_MODEL`. Il catalogo cambia lato server (al 15/11/2026 `agy models` elenca `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.8-flash`, `claude-opus-5-5`, `claude-sonnet-5-5`), quindi usa un ID presente in `agy models`. Con `--effort` (il default) l'ID va scritto **senza** il suffisso di sforzo (`gemini-4-hydrogen`, non `gemini-4-hydrogen-high`). Se l'ID non si risolve, in `-p` agy fallisce, mentre in `-i` ripiega **in silenzio** su Flash Medium. `agy-kit doctor` confronta `AGY_KIT_MODEL` con `agy models` (errore con l'elenco dei candidati se manca; solo un avviso se `agy models` non risponde); con `AGY_KIT_CHECK_MODEL=1` lo stesso controllo avvisa su stderr a ogni avvio in `-i` (spento di default: `agy models` interroga il server e aggiunge qualche secondo).
 
 ## 3. Uso
 

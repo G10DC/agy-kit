@@ -29,7 +29,7 @@ fi
 eval "$_agy_kit_saved"
 unset _v _agy_kit_saved _agy_kit_u
 
-AGY_KIT_MODEL="${AGY_KIT_MODEL:-gemini-3.8-flash}"
+AGY_KIT_MODEL="${AGY_KIT_MODEL:-gemini-4-hydrogen}"
 AGY_KIT_EFFORT="${AGY_KIT_EFFORT-high}"   # vuoto = non passare --effort
 # Default 1 solo se non impostata; poi conta solo il valore esatto 1 (vuoto = chiede i permessi).
 AGY_KIT_SKIP_PERMISSIONS="${AGY_KIT_SKIP_PERMISSIONS-1}"

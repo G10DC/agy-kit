@@ -1,18 +1,24 @@
 # Ultracode × Antigravity: routing policy for this session (claude-first)
 
-This session pairs Claude Code ultracode with the user's Antigravity UltraCode mode from agy-kit (Gemini with the `ultracode` skill, orchestrating Gemini Flash subagents). The user decided that too much work was going to Gemini, so Claude does the work and Antigravity is the exception. This overrides your usual model choices:
+This session pairs Claude Code ultracode with the user's `claude-code-setup` agent fleet (`esploratore`, `meccanico`, `esecutore`, `analista`) and Antigravity UltraCode mode from agy-kit (Gemini with the `ultracode` skill, orchestrating Gemini Flash subagents). Claude does the work by default and Antigravity is used on request or to spare Claude quota:
 
-- **Complex work stays on Claude Opus (you)**: complex reasoning, analysis, statistics, design, verification, judging, synthesis, and any task where an error would be costly or subtle.
-- **Simple, mechanical work goes to a cheaper Claude model: Haiku.** Downloads, file checks, listings, reformatting, simple extraction with a clear format, running a command and reporting its output. Sonnet is not available in this session (a request for it falls back to Opus and wastes budget), so the cheap model is `haiku`.
+- **Complex reasoning and orchestration stay on Claude Opus (you)**: architecture, complex reasoning, cross-source synthesis, verification, judging, and any decision where an error would be costly or subtle.
+- **Delegate only when justified (`CLAUDE.md` rule)**: subagents pay 20–40k fixed startup tokens and grow at every turn. Delegate **only if** (at least one): there is $>40\text{k}$ tokens of material to read; there are $>3$ independent parallelizable steps; or an independent adversarial judgment is needed. Otherwise work inline. Group related tasks into **one** agent with a self-contained prompt requesting a dense report.
+- **Route delegated Claude tasks to the user's specialized agents (`~/.claude/agents/`)**:
+  - **`esploratore`** (Haiku, high, read-only): broad searches and codebase exploration when only the conclusion is needed. First choice for reading.
+  - **`meccanico`** (Haiku, low; or `model: 'haiku'` in workflows): simple, mechanical work without judgment (downloads, file checks, listings, reformatting, simple extraction with a clear format, running a command and reporting its output).
+  - **`esecutore`** (Sonnet, high): the rest of delegated operational work (code implementation, refactors, debugging, tests). Pass `effort: 'medium'` for targeted searches and simple edits, `xhigh` for hard bugs, broad refactors, concurrency and security (`max` only after a failure at `xhigh`).
+  - **`analista`** (Opus, xhigh; `max` only for hard final verdicts): complex analysis and synthesis across multiple sources.
+  - Subagents without explicit `model` run on Sonnet (`CLAUDE_CODE_SUBAGENT_MODEL=sonnet`); built-in `Explore` and `Plan` are disabled because they inherit Opus.
 - **Antigravity is used only when the user asks for it, or when sparing Claude quota is the point** (for example a large batch of independent tasks the user wants kept off the Claude budget). Do not pick it by default and do not use it for work where quality matters more than quota: its output on analytical work has been unreliable (keyword-filter scripts instead of reading, invented quotes), so verify every report against the real files.
 - You reach Antigravity only through the `antigravity` subagent, which relays one task to the `mcp__antigravity__delegate` tool and returns a JSON report.
 
 ## How to route
 
-- A quick look to scope the work or to check a claim (a directory listing, one short file, one targeted search, `git status` / `git diff`) is yours.
-- Anything that needs judgment stays with Opus: `agent()` calls without `model` run on Opus in this session (sub-agents inherit it).
-- Mechanical leaves go to Haiku: pass `model: 'haiku'` on the `agent()` call. Give Haiku complete, unambiguous instructions and check its output; if a Haiku task fails once, redo it on Opus instead of resending.
-- Tasks that need tools only Claude has in this session (MCP connectors such as Google Drive, Gmail, Calendar, Notion, the Artifact and document tools) are yours, never Haiku's or Antigravity's.
+- A quick look to scope the work or to check a claim (a directory listing, one short file, one targeted search, `git status` / `git diff`) is yours (inline).
+- Operational coding, debugging and multi-step implementation go to `esecutore` (Sonnet); broad read-only exploration goes to `esploratore` (Haiku); mechanical leaves go to `meccanico` (Haiku, or `model: 'haiku'` on `agent()` calls). Give Haiku complete, unambiguous instructions and check its output; if a Haiku task fails once, redo it on `esecutore` (Sonnet) or Opus instead of resending.
+- Deep multi-source synthesis or adversarial judging stays with Opus (you) or `analista`.
+- Tasks that need tools only Claude has in this session (MCP connectors such as Google Drive, Gmail, Calendar, Notion, document tools; `Artifact` is excluded by default unless reopened with `ultra-ag -Artifact`) are yours, never Haiku's or Antigravity's.
 - When the user does ask for Antigravity ("delega a Gemini", "usa Antigravity"), or you propose it to spare Claude quota and the user agrees, follow the rest of this document for that task.
 
 ## Two kinds of task
@@ -23,25 +29,28 @@ This session pairs Claude Code ultracode with the user's Antigravity UltraCode m
 ## In workflow scripts
 
 ```js
-// Reasoning stage (the default): default agent type and no model override, so it runs on Opus.
-const check = await agent(verifyPrompt, { label: 'verify:parser', phase: 'Verify' })
+// Operational stage (default delegated work): esecutore on Sonnet (effort 'medium', 'high', or 'xhigh').
+const impl = await agent(implPrompt, { agentType: 'esecutore', label: 'impl:parser', phase: 'Execute' })
 
-// Simple mechanical leaf: the cheap Claude model.
+// Final synthesis or complex judging stage: analista (Opus xhigh).
+const check = await agent(verifyPrompt, { agentType: 'analista', label: 'verify:parser', phase: 'Verify' })
+
+// Simple mechanical leaf or read-only exploration: esploratore / meccanico / model: 'haiku'.
 const files = await agent(listPrompt, { model: 'haiku', label: 'list:inputs', phase: 'Gather' })
 
 // Only when the user asked for Antigravity: always the relay, never a model override. effort 'low': the relay only copies text.
 const r = await agent(taskText, { agentType: 'antigravity', effort: 'low', label: 'extract:movimenti', phase: 'Gather', schema: AG_REPORT })
 ```
 
-- Default agent type on Opus for anything that needs judgment; `model: 'haiku'` for simple mechanical leaves; `agentType: 'antigravity'` only for tasks the user wants on Antigravity. Never pass `model: 'sonnet'`, and never pass `model` together with `agentType: 'antigravity'`.
+- Always propose a token ceiling `+Nk` before launching a workflow. Every `agent()` call passes `agentType` (`'esecutore'` by default for operational work, `'esploratore'`/`'meccanico'` or `model: 'haiku'` for read-only/mechanical leaves, `'analista'` only for complex final synthesis and hard judging, `'antigravity'` only for tasks the user wants on Antigravity). Never pass `model` together with `agentType: 'antigravity'`.
 - Never use `isolation: 'worktree'` on antigravity calls: Antigravity's edits would stay stranded in the worktree.
 - Size each task to finish in about 15 minutes. Prefer more, smaller tasks over one big one.
-- Follow every edit phase with a verification phase (a reasoning stage) that reads the real diff (`git diff`, `git status`) and runs the relevant tests or build. For read-only results, spot-check the figures and quotes that your conclusions depend on.
+- Follow every edit phase with a verification phase that reads the real diff (`git diff`, `git status`) and runs the relevant tests or build. For read-only results, spot-check the figures and quotes that your conclusions depend on.
 - Only a few Antigravity tasks run at the same time (the bridge has a small number of slots); larger fan-outs simply queue.
 
 ## Outside workflows
 
-Do the work yourself or with a Haiku subagent. Call the `antigravity` subagent directly with the Agent tool only for tasks the user wants on Antigravity (read-only ones included), following the same task-writing rules. Several independent read-only tasks can be sent at once.
+Do the work inline unless delegation thresholds apply; when delegating, use `esploratore`, `meccanico`, `esecutore`, or `analista`. Call the `antigravity` subagent directly with the Agent tool only for tasks the user wants on Antigravity (read-only ones included), following the same task-writing rules. Several independent read-only tasks can be sent at once.
 
 ## Writing a task for Antigravity
 

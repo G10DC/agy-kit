@@ -1,11 +1,12 @@
 {
-  "availableModels": ["opus", "haiku"],
+  "availableModels": ["opus", "sonnet", "haiku"],
   "enableWorkflows": true,
   "permissions": {
     "allow": ["mcp__antigravity__delegate"]
   },
   "env": {
     "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS": "14400000",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "inherit"
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS": "1"
   }
 }

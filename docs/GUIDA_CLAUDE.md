@@ -1,6 +1,9 @@
 # Guida a ultra-ag: Claude Code che delega il lavoro pratico a UltraCode
 
-`ultra-ag` avvia Claude Code in modalità *ultracode* con una divisione dei ruoli precisa: **Opus ragiona, decide, sintetizza e verifica** (con solo qualche occhiata rapida ai file), **ogni task atomico di lavoro pratico va a UltraCode di questo kit** (Gemini con la skill `ultracode`, sotto-agenti Flash) — non solo implementazione, ma anche letture ed esplorazione di codice o documenti, ricerche, estrazione di dati da file (fogli di calcolo, PDF, log) e analisi. Sonnet non viene mai usato.
+`ultra-ag` avvia Claude Code in modalità *ultracode* integrando il setup di `claude-code-setup` con l'UltraCode di Antigravity (`agy-kit`):
+- Con `AGY_KIT_POLICY=claude-first` (usato in `antigravity-setup`): **Opus ragiona, decide, sintetizza e verifica**, delega solo oltre le soglie di costo (`>40k` token, `>3` passaggi paralleli, verifica avversariale) agli agent specializzati di `claude-code-setup` (`esploratore`/`meccanico` su Haiku, `esecutore` su Sonnet, `analista` su Opus) e usa Antigravity su richiesta esplicita o per risparmiare quota Claude.
+- Con `AGY_KIT_POLICY=gemini-first` (default del kit): **Opus ragiona, decide, sintetizza e verifica** e **ogni task atomico di lavoro pratico va a UltraCode di questo kit** (Gemini con la skill `ultracode`, sotto-agenti Flash) — implementazione (`mode: edit`) e letture/ricerche/estrazione dati (`mode: read-only`, risultato in `answer`).
+- Come in `cco`/`ccu` di `claude-code-setup`, lo strumento `Artifact` (~10k token fissi) è escluso di default (`--disallowedTools=Artifact`); passa `ultra-ag -Artifact` per riattivarlo.
 
 In pratica è un Ultracode che sfrutta l'UltraCode di Antigravity. Il normale `claude` resta com'era: la modalità esiste solo dentro `ultra-ag`.
 

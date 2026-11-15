@@ -320,9 +320,14 @@ else
 fi
 expect "relay antigravity su haiku con i soli tool delegate + ToolSearch" "haiku ['ToolSearch', 'mcp__antigravity__delegate']" \
   "$(cargs '(lambda g: g["model"]+" "+str(sorted(g["tools"])))(json.loads(a[a.index("--agents")+1])["antigravity"])')"
-expect "argomenti extra passati in coda" "--permission-mode auto" "$(cargs '" ".join(a[-2:])')"
+expect "argomenti extra passati in coda (con --disallowedTools=Artifact prima degli extra)" "--disallowedTools=Artifact --permission-mode auto" "$(cargs '" ".join(a[-3:])')"
+AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" -Artifact --permission-mode auto >/dev/null
+expect "-Artifact riattiva Artifact (toglie --disallowedTools=Artifact e non passa -Artifact a claude)" "False False --permission-mode auto" \
+  "$(cargs 'str("--disallowedTools=Artifact" in a)+" "+str("-Artifact" in a)+" "+" ".join(a[-2:])')"
 CLAUDE_CODE_SUBAGENT_MODEL=haiku AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" >/dev/null
-expect "CLAUDE_CODE_SUBAGENT_MODEL=inherit per claude (anche se l'utente ha haiku)" "inherit" "$(cat "$T/claude-env")"
+expect "gemini-first: CLAUDE_CODE_SUBAGENT_MODEL=inherit per claude (anche se l'utente ha haiku)" "inherit" "$(cat "$T/claude-env")"
+AGY_KIT_POLICY=claude-first CLAUDE_CODE_SUBAGENT_MODEL=haiku AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" >/dev/null
+expect "claude-first: CLAUDE_CODE_SUBAGENT_MODEL=sonnet (allineato a claude-code-setup)" "sonnet" "$(cat "$T/claude-env")"
 AGY_KIT_CLAUDE_MODEL=claude-opus-5-5 AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/ultra-ag" >/dev/null
 expect "AGY_KIT_CLAUDE_MODEL rispettato" "claude-opus-5-5" "$(cargs 'a[1]')"
 # un json.py nella cartella corrente non deve essere importato (python -I)
@@ -338,10 +343,10 @@ expect "agy mancante → exit 127" "127" "$?"
 "$PY" -c 'import json,sys; [json.load(open(f, encoding="utf-8")) for f in sys.argv[1:]]' \
   "$KIT/claude/settings.json" "$KIT/claude/agents.json" "$KIT/claude/bridge.example.json"
 expect "JSON di claude/ validi" "0" "$?"
-expect "Sonnet escluso da availableModels" "False" \
-  "$("$PY" -c 'import json,sys; sys.stdout.write(str(any("sonnet" in m for m in json.load(open(sys.argv[1]))["availableModels"])))' "$KIT/claude/settings.json")"
-expect "settings: workflow abilitati e sotto-agenti che ereditano il modello" "True inherit" \
-  "$("$PY" -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.stdout.write(str(s["enableWorkflows"])+" "+s["env"]["CLAUDE_CODE_SUBAGENT_MODEL"])' "$KIT/claude/settings.json")"
+expect "availableModels include opus, sonnet, haiku (niente Fable, allineato a claude-code-setup)" "['haiku', 'opus', 'sonnet']" \
+  "$("$PY" -c 'import json,sys; sys.stdout.write(str(sorted(json.load(open(sys.argv[1]))["availableModels"])))' "$KIT/claude/settings.json")"
+expect "settings: workflow abilitati, subagent su sonnet ed Explore/Plan disabilitati" "True sonnet 1" \
+  "$("$PY" -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.stdout.write(str(s["enableWorkflows"])+" "+s["env"]["CLAUDE_CODE_SUBAGENT_MODEL"]+" "+s["env"]["CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS"])' "$KIT/claude/settings.json")"
 grep -q 'Never call the tool a second time' "$KIT/claude/agents.json" && ! grep -q 'call the tool once more' "$KIT/claude/agents.json"
 expect "il relay non ritenta (un solo livello di retry)" "0" "$?"
 
@@ -371,8 +376,8 @@ out="$(AGY_KIT_POLICY=boh AGY_KIT_CLAUDE_BIN="$T/claude" "$BASH_BIN" "$KIT/bin/u
 expect "AGY_KIT_POLICY sconosciuta → exit 2, messaggio chiaro, claude non avviato" "2 1 no" \
   "$rc $(grep -c 'AGY_KIT_POLICY=boh non valido (valori ammessi: gemini-first, claude-first)' <<<"$out") $([ -e "$STUB_CLAUDE_ARGS" ] && echo sì || echo no)"
 P2="$KIT/claude/policy-claude-first.md"
-grep -qF "Antigravity is used only when the user asks" "$P2" && grep -q "model: 'haiku'" "$P2" && ! grep -q "default executor" "$P2"
-expect "policy claude-first: Opus/Haiku di default, Antigravity su richiesta" "0" "$?"
+grep -qF "Antigravity is used only when the user asks" "$P2" && grep -q "model: 'haiku'" "$P2" && grep -q "esecutore" "$P2" && grep -q "esploratore" "$P2" && ! grep -q "default executor" "$P2"
+expect "policy claude-first: Opus + agent di claude-code-setup (esecutore/esploratore/meccanico/analista), Antigravity su richiesta" "0" "$?"
 grep -q 'mode: read-only' "$P2" && grep -qF "answer: { type: 'string' }" "$P2" && grep -q '^- `busy`' "$P2"
 expect "policy claude-first: mantiene read-only, schema AG_REPORT e gestione degli stati" "0" "$?"
 grep -q "Antigravity is the default executor\|default executor for every" "$KIT/claude/policy.md"

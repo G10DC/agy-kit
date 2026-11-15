@@ -2,15 +2,17 @@
 # ==============================================================================
 # ultra-ag: Claude Code in modalità ultracode che delega l'implementazione ad Antigravity.
 #   - Opus ($AGY_KIT_CLAUDE_MODEL, default opus) ragiona, scompone, verifica
-#   - ogni task atomico va a UltraCode di agy-kit (agy-ultracode: Gemini + sotto-agenti Flash)
-#     tramite il relay `antigravity` (Haiku: il tool delegate più ToolSearch per caricarlo)
+#   - in claude-first usa gli agent di claude-code-setup (esploratore/meccanico su Haiku,
+#     esecutore su Sonnet, analista su Opus) + Antigravity su richiesta tramite il relay `antigravity`
+#   - in gemini-first ogni task atomico va a UltraCode di agy-kit tramite il relay `antigravity`
 #     e il bridge MCP claude/ag_bridge.py
-#   - Sonnet escluso (availableModels in claude/settings.json)
+#   - Artifact escluso di default (~10k token fissi): aggiungi -Artifact per riattivarlo
 # Uso:
 #   ultra-ag                        sessione interattiva
+#   ultra-ag -Artifact              riattiva lo strumento Artifact
 #   ultra-ag --permission-mode auto ogni argomento passa invariato a claude
 #   ultra-ag -p "…" --allowedTools Workflow   non interattivo
-# Policy: AGY_KIT_POLICY=gemini-first (default) | claude-first (Opus/Haiku, Antigravity su richiesta)
+# Policy: AGY_KIT_POLICY=gemini-first (default) | claude-first (Opus/Sonnet/Haiku + Antigravity su richiesta)
 # Guida: docs/GUIDA_CLAUDE.md
 # ==============================================================================
 set -euo pipefail
@@ -26,7 +28,7 @@ KIT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
 
 case "${1:-}" in
   -h|--help)
-    sed -n '3,14p' "$src" | sed 's/^# \{0,1\}//'
+    sed -n '3,16p' "$src" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 
@@ -79,9 +81,23 @@ if sys.argv[3]:
 sys.stdout.write(json.dumps({"mcpServers": {"antigravity": server}}))
 ' "$(agy_kit_native_path "$AGY_KIT_PY")" "$(agy_kit_native_path "$CL/ag_bridge.py")" "$BRIDGE_BASH")"
 
-# Gli stadi di workflow senza modello esplicito ereditano Opus anche se l'utente ha
-# impostato CLAUDE_CODE_SUBAGENT_MODEL (per esempio haiku) altrove.
-export CLAUDE_CODE_SUBAGENT_MODEL=inherit
+# In claude-first i subagent senza modello esplicito girano su Sonnet (come in claude-code-setup);
+# in gemini-first ereditano Opus (gli stadi di workflow senza agentType sono stadi di verifica).
+if [ "$AGY_KIT_POLICY" = claude-first ]; then
+  export CLAUDE_CODE_SUBAGENT_MODEL=sonnet
+else
+  export CLAUDE_CODE_SUBAGENT_MODEL=inherit
+fi
+
+# Artifact escluso di default (~8-10k token fissi, come in cco/ccu di claude-code-setup):
+# passa -Artifact per riattivarlo.
+art=""
+rest=()
+for a in "$@"; do
+  if [ "$a" = -Artifact ]; then art=1; else rest+=("$a"); fi
+done
+extra_flags=()
+[ -z "$art" ] && extra_flags+=(--disallowedTools=Artifact)
 
 exec "$CLAUDE_BIN" \
   --model "$AGY_KIT_CLAUDE_MODEL" \
@@ -90,4 +106,5 @@ exec "$CLAUDE_BIN" \
   --mcp-config "$MCP_JSON" \
   --agents "$(cat "$CL/agents.json")" \
   --append-system-prompt-file "$(agy_kit_native_path "$POLICY_FILE")" \
-  "$@"
+  ${extra_flags[@]+"${extra_flags[@]}"} \
+  ${rest[@]+"${rest[@]}"}

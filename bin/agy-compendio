@@ -139,7 +139,7 @@ Vincolo: non creare né modificare altri file nella cartella analizzata oltre al
 
 Procedura:
 1. Censisci l'albero dei file con un comando reale e annota il totale.
-2. Delega la lettura analitica e l'estrazione verbatim a sotto-agenti con invoke_subagent e modello flash, in parallelo per gruppi di file. Tieni per te (Pro) sintesi, collegamenti, deduzioni e verifica.
+2. Delega la lettura analitica e l'estrazione verbatim a sotto-agenti con invoke_subagent (TypeName research, Model flash), in parallelo per gruppi di file. Tieni per te (modello principale) sintesi, collegamenti, deduzioni e verifica.
 3. Normalizza e confronta i dati; raccogli le discrepanze in una sezione [VERIFICARE].
 4. Scrivi il file con: indice (TOC), scheda rapida, inventario dei file con metadati, schede tematiche, collegamenti incrociati, cronologia, registro delle deduzioni (ID, premessa, motivazione, confidenza), discrepanze [VERIFICARE], glossario, tabella di contatti e URL, appendice di metodo e limiti.
 5. Controlla che ogni file dell'albero del punto 1 sia coperto (anche quelli esclusi come possibili segreti, citati per nome).
