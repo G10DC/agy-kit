@@ -2,7 +2,7 @@
 
 Kit portabile che aggiunge ad Antigravity CLI (`agy`) due modalità, più un ponte da Claude Code:
 
-- **UltraCode** (`ultracode` / `agy ultracode`): sessione a massimo sforzo con il modello configurato in `AGY_KIT_MODEL` (default `gemini-4-hydrogen`, `--effort high`). Sotto-agenti Flash (`research` read-only o `self`) con soglie di delega anti-spreco e protocollo anti-allucinazione integrato con `CLAUDE.md`.
+- **UltraCode** (`ultracode` / `agy ultracode`): sessione a massimo sforzo con il modello configurato in `AGY_KIT_MODEL` (default `gemini-4-hydrogen`, `--effort high`), sotto-agenti Flash (`research` read-only o `self`) con soglie di delega anti-spreco, protocollo anti-allucinazione integrato con `CLAUDE.md` e verifica finale indipendente su `claude-opus-5-5-medium` via `swarm` per i deliverable sostanziali.
 - **Compendio** (`compendio` / `agy compendio`): genera da una cartella una base di conoscenza unica e verificata. Alla fine la controlla con **`compendio-verify`**, che fa controlli deterministici su link, citazioni, hash e dichiarazioni di completezza.
 - **ultra-ag** (`ultra-ag`): Claude Code in modalità ultracode con due policy (`AGY_KIT_POLICY`): in `claude-first` usa Opus + i 4 agent di `claude-code-setup` (`esploratore`/`meccanico` su Haiku, `esecutore` su Sonnet, `analista` su Opus) e delega ad Antigravity su richiesta o per risparmiare quota Claude; in `gemini-first` **Opus ragiona, decide e verifica** e **ogni task atomico di lavoro pratico va a UltraCode** tramite il relay Haiku e il bridge MCP. `Artifact` è escluso di default (`ultra-ag -Artifact` per riattivarlo). Facoltativo: serve Claude Code 2.1.280 o successivo.
 
