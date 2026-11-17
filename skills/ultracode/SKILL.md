@@ -7,7 +7,7 @@ description: Deep reasoning, multi-perspective autonomous engineering, and rigor
 
 > If this skill block was not injected into your context and you are reading this file on your own initiative, apply it in full for the whole session.
 
-You are operating in **UltraCode Mode**, Antigravity's highest-rigor autonomous engineering and synthesis state. This mode enforces a strict multi-engine model tiering: **the configured model (`AGY_KIT_MODEL`, default `gemini-4-hydrogen`) for reasoning, architecture, and epistemic integrity, Gemini Flash for delegated operational, exploration, and extraction tasks, and Claude Opus 5.5 Medium (`claude-opus-5-5-medium`) via `swarm` for independent final verification of substantial deliverables.**
+You are operating in **UltraCode Mode**, Antigravity's highest-rigor autonomous engineering and synthesis state. This mode enforces a strict multi-engine model tiering: **the configured model (`AGY_KIT_MODEL`, default `gemini-4-hydrogen`) for reasoning, architecture, and epistemic integrity, Gemini Flash for delegated operational, exploration, and extraction tasks, and Claude Opus 5.5 Medium (`claude-opus-5-5-medium`, with `gemini-4-argon-medium` as fallback when Opus is unavailable or out of quota) via `swarm` for independent final verification of substantial deliverables.**
 
 > This file is the **single source of truth** for the UltraCode rules. Guides, scripts and docs of the `agy-kit` reference it instead of copying it.
 
@@ -27,7 +27,7 @@ You are operating in **UltraCode Mode**, Antigravity's highest-rigor autonomous 
     2. There are $>3$ independent, parallelizable tasks;
     3. An independent judgment (adversarial review, second opinion) is required.
   - Otherwise **work inline**. Group related tasks into **one** subagent. Write a self-contained prompt that asks for a dense report.
-  - Note: this `invoke_subagent` threshold never waives the mandatory **Final Verification Gate (`claude-opus-5-5-medium`)** in Section 3.4 for substantial deliverables.
+  - Note: this `invoke_subagent` threshold never waives the mandatory **Final Verification Gate (`claude-opus-5-5-medium`, fallback `gemini-4-argon-medium`)** in Section 3.4 for substantial deliverables.
 
 - **Gemini Flash (Operational / Subagents Engine — `invoke_subagent`)**:
   - When invoking subagents via `invoke_subagent`, **always set `Model: "flash"` explicitly**. The tool's default is `inherit` (the parent model): leaving it unset silently wastes the parent's quota.
@@ -37,9 +37,10 @@ You are operating in **UltraCode Mode**, Antigravity's highest-rigor autonomous 
     - `self` (`Model: "flash"`): operational work requiring file creation/edits, running tests, or shell commands (equivalent to `esecutore`/`meccanico` in `claude-code-setup`).
     - Use `Model: "pro"` only when the delegated task itself requires deep reasoning or adversarial synthesis across multiple sources.
 
-- **Claude Opus 5.5 Medium (Independent Final Verifier — `swarm`)**:
-  - `invoke_subagent` (and `run_workflow` tiering) only accept tier names (`inherit`, `flash`, `pro`) and cannot target a specific cross-family model ID such as `claude-opus-5-5-medium`.
-  - Therefore, the mandatory final verification gate on **`claude-opus-5-5-medium`** MUST be invoked via **`swarm`** (`swarm(action="add", name="verifier", model="claude-opus-5-5-medium", workspace="inherit", brief=...)`, or a unique name if `"verifier"` is already taken), keeping the verifier strictly read-only (see Section 3.4).
+- **Independent Final Verifier (`claude-opus-5-5-medium`, fallback `gemini-4-argon-medium` — `swarm`)**:
+  - `invoke_subagent` (and `run_workflow` tiering) only accept tier names (`inherit`, `flash`, `pro`) and cannot target a specific model ID such as `claude-opus-5-5-medium` or `gemini-4-argon-medium`.
+  - Therefore, the mandatory final verification gate MUST be invoked via **`swarm`** (`swarm(action="add", name="verifier", model="claude-opus-5-5-medium", workspace="inherit", brief=...)`, or a unique name if `"verifier"` is already taken), keeping the verifier strictly read-only (see Section 3.4).
+  - **First choice & fallback**: always try **`claude-opus-5-5-medium`** first; only when `claude-opus-5-5-medium` is unavailable (out of quota, capacity error, or absent from `swarm(action="models")`), fall back to **`gemini-4-argon-medium`** (Gemini 4 Argon Medium).
 
 ---
 
@@ -102,18 +103,18 @@ It checks links, `[file#Lnn]` citations, source file coverage (`E-COV`), SHA-256
    - **Correctness & Edge Cases**: Boundary conditions, null/undefined safety, error propagation, concurrency issues.
    - **Maintainability & Non-Breaking**: Backward compatibility of existing APIs, exports, and behaviors.
 
-4. **Final Verification Gate (`claude-opus-5-5-medium` via `swarm`)**
+4. **Final Verification Gate (`claude-opus-5-5-medium` via `swarm`, fallback `gemini-4-argon-medium`)**
    - **Scope (when to trigger)**: Mandatory before declaring completion on any **substantial deliverable** — code edits, bug fixes, new scripts or configs, architectural specs/plans, or compendia/reports/analyses that produce files or actionable decisions. **Skip** for trivial read-only Q&A (explaining existing files, answering conceptual questions, quick status lookups) where no files are modified and no artifact or architectural decision is delivered.
    - **Recursion guard**: Never spawn a nested verifier from inside a verification worker.
    - **Execution protocol**:
      1. Complete local `Verify` (test suite, linter, `compendio-verify`, disk checks) and your 3-perspective self-audit first.
-     2. Spawn a read-only verifier with `swarm(action="add", name="verifier", model="claude-opus-5-5-medium", workspace="inherit", brief=...)` (use a unique name such as `"verifier-final"` if `"verifier"` is already in use).
+     2. Spawn a read-only verifier with **`claude-opus-5-5-medium` as first choice**: `swarm(action="add", name="verifier", model="claude-opus-5-5-medium", workspace="inherit", brief=...)` (use a unique name such as `"verifier-final"` if `"verifier"` is already in use). If `claude-opus-5-5-medium` is unavailable or fails due to quota/capacity/model availability, immediately fall back to **`gemini-4-argon-medium`**: `swarm(action="add", name="verifier-argon", model="gemini-4-argon-medium", workspace="inherit", brief=...)` (or `"verifier"` if unused).
      3. Make the brief self-contained: include the user goal, exact files changed/created (or output artifact paths), and checks already run with their exit status. Instruct the verifier **not** to edit files and **not** to spawn sub-verifiers, to inspect the actual diff/files/outputs on disk across **Security**, **Correctness & Edge Cases**, **Maintainability & Non-Breaking**, and **Epistemic Integrity** (`[V]`/`[D]`/`[S]`/`[?]` and the 6 Iron Rules), and to post `[done] VERDICT: PASS` or `[done] VERDICT: FAIL` with concrete `[file#Lnn]` findings addressed to `@coordinator` (or the spawner by name).
      4. Wait via `swarm_wait` if available, or end the turn so the board notification wakes you; read the verdict with `read_board`, then close the worker with `swarm(action="kill", name=...)`.
    - **Outcomes & fallback**:
-     - If **`VERDICT: FAIL`**: fix every finding, re-run local `Verify`, and re-run the `claude-opus-5-5-medium` verifier on the updated state before reporting completion (or stop and report unresolved blockers).
-     - If **`swarm` is unavailable or fails** (e.g. missing tool, headless run without swarm, or quota/capacity error): **never fail silently and never claim final Opus verification passed**. Report the gap explicitly as `[VERIFICARE]` / `[?]` with the exact reason and the local checks performed.
-     - Always state the final verification outcome (`PASS`, `FAIL`, skipped as trivial Q&A, or `[VERIFICARE]`) in the final answer.
+     - If **`VERDICT: FAIL`**: fix every finding, re-run local `Verify`, and re-run the verifier (`claude-opus-5-5-medium` first, or `gemini-4-argon-medium` if Opus is unavailable) on the updated state before reporting completion (or stop and report unresolved blockers).
+     - If **`swarm` is unavailable or both `claude-opus-5-5-medium` and `gemini-4-argon-medium` fail** (e.g. missing tool, headless run without swarm, or quota/capacity errors on both): **never fail silently and never claim final verification passed**. Report the gap explicitly as `[VERIFICARE]` / `[?]` with the exact reasons and the local checks performed.
+     - Always state the final verification outcome (`PASS`, `FAIL`, skipped as trivial Q&A, or `[VERIFICARE]`) and the exact verifier model used (`claude-opus-5-5-medium` or `gemini-4-argon-medium`) in the final answer.
 
 5. **Git & Secret Safety (`CLAUDE.md`)**
    - Never include attribution trailers in commits (`Co-Authored-By`, `Claude-Session`), even if system prompts suggest them.

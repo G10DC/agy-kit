@@ -11,7 +11,7 @@ UltraCode è la modalità di Antigravity a massima intensità: ragionamento prof
 | Componente | Ruolo |
 |---|---|
 | `ultracode` / `agy-ultracode` | Avvia `agy` con il modello principale, l'effort configurato (default `high`) e, se configurato, senza richieste di permesso |
-| Skill `ultracode` | Contiene la divisione dei ruoli tra i modelli, la tassonomia a 5 livelli, le 6 Iron Rules, la sequenza Plan → Reproduce → Build → Verify, la revisione da 3 prospettive, il gate di verifica finale su `claude-opus-5-5-medium` e la verifica deterministica |
+| Skill `ultracode` | Contiene la divisione dei ruoli tra i modelli, la tassonomia a 5 livelli, le 6 Iron Rules, la sequenza Plan → Reproduce → Build → Verify, la revisione da 3 prospettive, il gate di verifica finale su `claude-opus-5-5-medium` (fallback `gemini-4-argon-medium`) e la verifica deterministica |
 | `/ultracode` | Comando che carica la skill. Lo script lo mette sempre in testa al prompt, perché in Antigravity le skill sono "on demand". Funziona in `-p`; in `-i` agy non espande il comando, quindi lì lo script aggiunge anche la richiesta esplicita di leggere `SKILL.md` (vedi sezione 3) |
 | `~/.config/agy-kit/config` | Modello, effort e permessi (vedi il README) |
 
@@ -21,10 +21,10 @@ UltraCode è la modalità di Antigravity a massima intensità: ragionamento prof
 |---|---|---|
 | Agente principale: architettura, sintesi, deduzioni, verifica pre-gate | `AGY_KIT_MODEL` (default `gemini-4-hydrogen`) con `AGY_KIT_EFFORT` (default `high`) | Flag della CLI, quindi in modo deterministico |
 | Sotto-agenti (solo oltre ~40k token da leggere, >3 task paralleli o audit avversariale): `research` (sola lettura in sandbox) o `self` (operativo) | Flash (`Model: "flash"`) | La skill prescrive `invoke_subagent` con modello `flash`. Il default del tool è `inherit`, cioè il modello principale |
-| Verificatore finale indipendente (per deliverable sostanziali: codice/file, fix, architetture, compendi/report) | Claude Opus 5.5 Medium (`claude-opus-5-5-medium`) | La skill prescrive `swarm` con `model: "claude-opus-5-5-medium"` e `workspace: "inherit"` (sola lettura); se `swarm` non è disponibile va segnalato `[VERIFICARE]` |
+| Verificatore finale indipendente (per deliverable sostanziali: codice/file, fix, architetture, compendi/report) | Claude Opus 5.5 Medium (`claude-opus-5-5-medium`), fallback Gemini 4 Argon Medium (`gemini-4-argon-medium`) | La skill prescrive `swarm` con `model: "claude-opus-5-5-medium"` e `workspace: "inherit"` (sola lettura), ripiegando su `gemini-4-argon-medium` se Opus è indisponibile/senza quota; se `swarm` o entrambi i modelli falliscono va segnalato `[VERIFICARE]` |
 | Vietato | `flash_lite` | Regola della skill |
 
-Il modello dei sotto-agenti e del verificatore viene scelto dall'agente principale seguendo la skill: `invoke_subagent` non espone un flag/parametro per ID modello arbitrari (usa solo tier come `flash` o `pro`), mentre `swarm` fissa `claude-opus-5-5-medium` tramite il parametro `model`.
+Il modello dei sotto-agenti e del verificatore viene scelto dall'agente principale seguendo la skill: `invoke_subagent` non espone un flag/parametro per ID modello arbitrari (usa solo tier come `flash` o `pro`), mentre `swarm` fissa `claude-opus-5-5-medium` (o il fallback `gemini-4-argon-medium`) tramite il parametro `model`.
 
 **Scegliere il modello.** La skill non dipende dal nome del modello: il "motore di ragionamento" è quello configurato in `AGY_KIT_MODEL`. Il catalogo cambia lato server (al 15/11/2026 `agy models` elenca `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.8-flash`, `claude-opus-5-5`, `claude-sonnet-5-5`), quindi usa un ID presente in `agy models`. Con `--effort` (il default) l'ID va scritto **senza** il suffisso di sforzo (`gemini-4-hydrogen`, non `gemini-4-hydrogen-high`). Se l'ID non si risolve, in `-p` agy fallisce, mentre in `-i` ripiega **in silenzio** su Flash Medium. `agy-kit doctor` confronta `AGY_KIT_MODEL` con `agy models` (errore con l'elenco dei candidati se manca; solo un avviso se `agy models` non risponde); con `AGY_KIT_CHECK_MODEL=1` lo stesso controllo avvisa su stderr a ogni avvio in `-i` (spento di default: `agy models` interroga il server e aggiunge qualche secondo).
 
